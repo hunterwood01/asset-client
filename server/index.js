@@ -49,7 +49,7 @@ app.use(session({
   rolling: true,
   cookie: {
     httpOnly: true,
-    secure: production,
+    secure: production && String(process.env.APP_ORIGIN || '').startsWith('https://'),
     sameSite: 'strict',
     maxAge: 8 * 60 * 60 * 1000
   }
