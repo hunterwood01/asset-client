@@ -14,7 +14,7 @@ Add **Amministrazione → Connettori → Webex** with:
 - Connection status and tenant/organization identifier (never expose secrets).
 - “Verifica connessione” and “Sincronizza ora” actions.
 - Last successful sync, sync duration, records read, warnings, and API errors.
-- A comparison view: Webex-only, Asset Client-only, matched, possible duplicates, and assignment mismatches (Webex person/workspace versus Asset Client assignment).
+- A comparison view: Webex-only, Asset Client-only, matched, possible duplicates, assignment mismatches (Webex person/workspace versus Asset Client assignment), and suggested/confirmed branch association.
 - A persistent alert when Webex reports a device serial that is not present in Asset Client; show serial, model, Webex device ID, source/type, first-seen time, last-seen time and a link to review.
 - Alert lifecycle: new, acknowledged, resolved; prevent duplicate active alerts for the same normalized serial/device identity, but retain alert history.
 - A lifecycle view for End-of-Life dates and other available milestones, with source and last-verified date.
@@ -29,9 +29,10 @@ Only administrators can configure or run a sync. Operators do not get access to 
 2. **Webex API client** — use Cisco's documented Webex REST APIs for organization devices, workspace details and Webex Calling device/assignment information as applicable to the organization and granted scopes. Keep endpoint-specific adapters separate because device types and fields differ.
 3. **Read-only snapshot store** — save normalized external records and sync metadata separately from the operational inventory. Store external IDs, source, device type, model/product ID where exposed, serial number where exposed, MAC where exposed, display name, workspace/user assignment where exposed (including stable person/workspace IDs plus display name/email or workspace name when permitted), reported status where available, and last-seen/sync timestamps. Avoid persisting unnecessary personal data.
 4. **Unknown-serial detector and alert store** — after a complete successful sync, compare normalized Webex serials against Asset Client manufacturer serials. Create a persistent alert when a serial is not found; deduplicate repeat observations, update last-seen, and reopen a resolved alert only under an explicit rule. Devices without a serial are not silently ignored: classify them as “serial unavailable / review required”, using Webex ID and MAC for tracking but do not claim they have an unknown serial.
-5. **Product lifecycle service** — retrieve Cisco End-of-Life (EoX) information using exact product identifiers (PID/SKU/model, and serial when supported) via the official Cisco Support APIs. Store announcement, End-of-Sale, End-of-Support/Last Date of Support, and other returned milestones separately, along with source and checked-at date. For RoomOS devices, also verify whether Control Hub lifecycle data is exposed through an official API for the target device types; do not scrape the UI or assume all models expose these milestones.
-6. **Matcher/diff engine** — match first by normalized manufacturer serial, then stable external ID/MAC where useful; present weaker name/model matches as suggestions only. Never auto-merge ambiguous matches.
-7. **Admin UI** — display differences and allow export/review. Phase one has no “apply to inventory” or “manage in Webex” operation.
+5. **Branch resolver** — derive a candidate branch from available Webex location/workspace metadata and device display name, then resolve it only against the authoritative NETWORK branch list using explicit configured mappings or unambiguous identifiers. Do not create branches or guess from free text; uncertain matches require administrator review.
+6. **Product lifecycle service** — retrieve Cisco End-of-Life (EoX) information using exact product identifiers (PID/SKU/model, and serial when supported) via the official Cisco Support APIs. Store announcement, End-of-Sale, End-of-Support/Last Date of Support, and other returned milestones separately, along with source and checked-at date. For RoomOS devices, also verify whether Control Hub lifecycle data is exposed through an official API for the target device types; do not scrape the UI or assume all models expose these milestones.
+7. **Matcher/diff engine** — match first by normalized manufacturer serial, then stable external ID/MAC where useful; present weaker name/model matches as suggestions only. Never auto-merge ambiguous matches.
+8. **Admin UI** — display differences and allow export/review. Phase one has no “apply to inventory” or “manage in Webex” operation.
 
 ## Authentication and security
 
@@ -45,6 +46,7 @@ Only administrators can configure or run a sync. Operators do not get access to 
 ## Asset Client data rules
 
 - The NETWORK source remains authoritative for branch identity and branch mapping. Do not infer or create branches from Webex names.
+- Webex device name and location/workspace metadata may be used to suggest a branch association, but must not override NETWORK or be treated as authoritative by themselves. Automatically associate a device to a branch only when a deterministic, configured mapping to a known NETWORK branch is available; otherwise present a suggested branch with the evidence and require administrator confirmation.
 - Do not create duplicate inventory devices automatically. Missing or uncertain mappings are comparison findings for an administrator to review.
 - Manufacturer serial matching is case/whitespace normalized but the original serial is retained for display. Never substitute SKU/model or Webex device ID for a serial. If serial is absent in the API response, report that separately from a serial that is present but not found in Asset Client.
 - Alerts must only be created from complete successful Webex syncs; partial/failed syncs must not create false “new device” alerts or resolve existing ones.
@@ -87,7 +89,8 @@ Only label records “Asset Client only” after a complete successful sync for 
 ### Phase 0 — verify API contract
 - Confirm the Webex organization and expected authorization owner.
 - Map each required data field to an official Cisco endpoint and exact read scope.
-- Verify support for phone/Calling devices and RoomOS devices separately, including pagination, status fields, serial-number availability by device type, and user/workspace assignment fields. Where supported, retrieve the associated person or workspace through the official device and Calling APIs; record assignment as unknown rather than guessing when the API does not expose it.
+- Verify support for phone/Calling devices and RoomOS devices separately, including pagination, status fields, serial-number availability by device type, user/workspace assignment fields, and any official location metadata. Where supported, retrieve the associated person or workspace through the official device and Calling APIs; record assignment as unknown rather than guessing when the API does not expose it.
+- Define deterministic mappings from Webex location/workspace/name metadata to known NETWORK branch identifiers; confirm what is reliable in the target tenant before enabling automatic branch association.
 - Document API limits and any fields that are not available.
 
 ### Phase 1 — secure connection and read-only sync
@@ -121,6 +124,7 @@ Only label records “Asset Client only” after a complete successful sync for 
 - A failed or partial sync never causes records to be reported as deleted, creates false unknown-serial alerts, or silently changes inventory.
 - A device serial observed in Webex but absent from Asset Client creates one persistent, deduplicated alert after a complete successful sync.
 - Where Webex exposes it, each snapshot includes the device's assigned person or workspace and stable Webex identifier; differences from Asset Client assignment are shown for administrator review.
+- A device can be associated to a branch automatically only when available Webex metadata resolves through an explicit, unambiguous mapping to a branch already present in NETWORK. Otherwise Asset Client shows a suggested branch and asks an administrator to confirm.
 - Cisco lifecycle milestones are sourced from an official endpoint, preserve distinct date types, and display source plus last verification time.
 - Match decisions are explainable and uncertain matches require human review.
 - Branch truth continues to come from NETWORK.
