@@ -30,18 +30,21 @@ async function loadVideoSeed(){
   }else throw new Error('Formato video-seed.json non riconosciuto');
   const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('it').replace(/[^a-z0-9]+/g,' ').trim();
   const slug=s=>norm(s).replace(/\s+/g,'-').slice(0,40)||'sede';
-  let added=0,branchesAdded=0;
+  let added=0,skipped=0;const unmatched=[];
   records.forEach((row,index)=>{
    const [company,site,type,, ,status,contract]=row;
    if(!type||String(type).trim().toUpperCase()==='N/A')return;
-   let branch=db.branches.find(b=>norm(b.name)===norm(site));
-   if(!branch){branch={id:uid(),ragioneSociale:String(company||'').trim(),name:String(site||'').trim(),phonePrefix:'',networkLan:'',networkServices:'',networkGuest:'',wlc:'',voice:'',oldName:'',newName:''};db.branches.push(branch);branchesAdded++}
-   else if(!branch.ragioneSociale&&company)branch.ragioneSociale=String(company).trim();
+   const branch=db.branches.find(b=>norm(b.name)===norm(site));
+   if(!branch){skipped++;unmatched.push(String(site||'(filiale vuota)'));return}
    const serial='VIDEO-'+slug(company)+'-'+slug(site)+'-'+String(index+1).padStart(3,'0');
    if(db.devices.some(d=>d.videoSeedId===index+1||d.serial===serial))return;
    db.devices.push({id:uid(),videoSeedId:index+1,serial,type:String(type).trim(),brand:'Cisco',model:String(type).trim(),status:norm(status)==='ok'?'Operativo':'Disponibile',branchId:branch.id,assignedTo:'',purchaseCost:0,purchaseDate:'',activationDate:'',monthlyFee:0,usefulLifeMonths:36,replacedFrom:'',notes:contract?('Contratto: '+String(contract).trim()):'Contratto non specificato',lotId:''});added++;
   });
-  db.settings.videoSeedVersion='2026-10-09';save();console.info('Sale riunioni importate:',added,'apparati,',branchesAdded,'filiali aggiunte');render();
+  if(skipped===0)db.settings.videoSeedVersion='2026-10-09';
+  save();
+  console.info('Sale riunioni importate:',added,'apparati; filiali non corrispondenti:',skipped);
+  if(unmatched.length)console.warn('Dispositivi non importati: associare prima queste filiali nell’anagrafica:',[...new Set(unmatched)]);
+  render();
  }catch(err){console.error('Caricamento apparati sale riunioni non riuscito:',err)}
 }
 function styles(){if($('#assetStyles'))return;let s=document.createElement('style');s.id='assetStyles';s.textContent='.dashboard-link{cursor:pointer;transition:transform .15s ease,border-color .15s ease}.dashboard-link:hover{transform:translateY(-2px);border-color:var(--primary)}.dashboard-link:focus-visible{outline:3px solid var(--primary);outline-offset:3px}.device-kind{display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border-radius:9px;background:var(--kind-bg);color:var(--kind-color);font-size:.78rem;font-weight:750;white-space:nowrap}.device-cell{display:grid;gap:6px;min-width:145px}.finance-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.finance-grid .card{min-width:0}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.form-grid label{display:grid;gap:5px;font-size:.9rem}.form-grid input,.form-grid select,.form-grid textarea{width:100%;min-width:0;padding:10px;border:1px solid var(--border);border-radius:9px;background:var(--bg);color:var(--text)}.muted{color:var(--muted)}.pill{display:inline-block;padding:4px 8px;border-radius:7px;background:var(--surface-2);font-size:.8rem}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.finance-note{padding:12px 14px;background:var(--surface-2);border-radius:12px;color:var(--muted)}.mini-actions{display:flex;gap:8px;flex-wrap:wrap}@media(max-width:900px){.finance-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:600px){.finance-grid,.form-grid{grid-template-columns:1fr}}';document.head.append(s)}
