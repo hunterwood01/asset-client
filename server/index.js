@@ -602,12 +602,12 @@ app.post('/api/admin/webex/sync', requireAuth, requireAdmin, async (req,res,next
         if (alertType) {
           await client.query(`INSERT INTO webex_device_alerts(alert_type,webex_device_id,normalized_serial,serial_number,product,mac,display_name,person_email,workspace_id,workspace_name,status)
             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'new')
-            ON CONFLICT(alert_type,webex_device_id,normalized_serial) DO UPDATE SET serial_number=EXCLUDED.serial_number,product=EXCLUDED.product,mac=EXCLUDED.mac,display_name=EXCLUDED.display_name,person_email=EXCLUDED.person_email,workspace_id=EXCLUDED.workspace_id,workspace_name=EXCLUDED.workspace_name,last_seen_at=NOW(),updated_at=NOW(),
-              status=CASE WHEN webex_device_alerts.status='resolved' THEN 'new' ELSE webex_device_alerts.status END,
-              resolved_at=CASE WHEN webex_device_alerts.status='resolved' THEN NULL ELSE webex_device_alerts.resolved_at END`,
+            ON CONFLICT(alert_type,webex_device_id,normalized_serial) DO UPDATE SET serial_number=EXCLUDED.serial_number,product=EXCLUDED.product,mac=EXCLUDED.mac,display_name=EXCLUDED.display_name,person_email=EXCLUDED.person_email,workspace_id=EXCLUDED.workspace_id,workspace_name=EXCLUDED.workspace_name,last_seen_at=NOW(),updated_at=NOW()`,
             [alertType,d.id,normalized,serial||null,d.product,d.mac,d.displayName,d.personEmail,d.workspaceId,d.workspaceName]);
+          if (normalized) await client.query("UPDATE webex_device_alerts SET status='resolved',resolution_reason='serial now available from Webex',resolved_at=NOW(),updated_at=NOW() WHERE alert_type='serial_unavailable' AND webex_device_id=$1 AND status<>'resolved'",[d.id]);
         } else {
           await client.query("UPDATE webex_device_alerts SET status='resolved',resolution_reason='serial matched in Asset Client',resolved_at=NOW(),updated_at=NOW() WHERE alert_type='unknown_serial' AND webex_device_id=$1 AND status<>'resolved'",[d.id]);
+          await client.query("UPDATE webex_device_alerts SET status='resolved',resolution_reason='serial now available from Webex',resolved_at=NOW(),updated_at=NOW() WHERE alert_type='serial_unavailable' AND webex_device_id=$1 AND status<>'resolved'",[d.id]);
         }
       }
       await client.query("UPDATE webex_sync_runs SET status='success',finished_at=NOW(),records_read=$1 WHERE id=$2",[devices.length,runId]);
