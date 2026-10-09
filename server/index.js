@@ -64,7 +64,7 @@ function auditSafe(value, key = '') {
   return value;
 }
 app.use((req, res, next) => {
-  if (!req.path.startsWith('/api/') || !['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) || ['/api/auth/login', '/api/auth/logout', '/api/auth/change-password'].includes(req.path)) return next();
+  if (!req.path.startsWith('/api/') || !['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) || ['/api/auth/login', '/api/auth/logout'].includes(req.path)) return next();
   res.on('finish', () => {
     const userId = req.session?.userId;
     if (!userId || res.statusCode < 200 || res.statusCode >= 400) return;
