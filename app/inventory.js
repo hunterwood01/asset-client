@@ -31,4 +31,19 @@ function render(){styles();nav();let titles={dashboard:['Dashboard','Panoramica 
 document.addEventListener('click',e=>{if(e.target.id==='themeToggle'){setTimeout(()=>localStorage.setItem('asset-client-theme',document.documentElement.dataset.theme||'light'),0)}});
 let savedTheme=localStorage.getItem('asset-client-theme');if(savedTheme)document.documentElement.dataset.theme=savedTheme;
 render();
+fetch('./network-seed.json').then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(rows=>{
+  if(db.settings.networkSeedVersion==='2026-05-05')return;
+  let added=0,updated=0;
+  for(const row of rows){
+    const [name,phonePrefix,networkLan,networkServices,networkGuest,wlc,voice,oldName]=row;
+    const fields={name,phonePrefix,networkLan,networkServices,networkGuest,wlc,voice,oldName,newName:''};
+    const existing=db.branches.find(b=>String(b.name||'').trim().toLocaleLowerCase('it')===name.trim().toLocaleLowerCase('it'));
+    if(existing){Object.assign(existing,fields);updated++}
+    else{db.branches.push({id:uid(),...fields});added++}
+  }
+  db.settings.networkSeedVersion='2026-05-05';
+  save();
+  console.info('NETWORK seed caricato:',added,'nuove filiali,',updated,'aggiornate');
+  render();
+}).catch(err=>console.error('Caricamento anagrafica NETWORK non riuscito:',err));
 })();
