@@ -1,12 +1,10 @@
 services:
   web:
-    image: nginx:alpine
+    build: .
     container_name: asset-client-web
     restart: unless-stopped
     ports:
       - "8080:80"
-    volumes:
-      - ./app:/usr/share/nginx/html:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost/ >/dev/null || exit 1"]
       interval: 30s
