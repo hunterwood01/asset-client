@@ -57,11 +57,11 @@ Only administrators can configure or run a sync. Operators do not get access to 
 - A sync updates only the connector snapshot and sync metadata. Existing asset, contract, branch, activation, financial, and lifecycle data remain unchanged.
 - Preserve source timestamps and last successful sync. API omissions/errors must not be interpreted as remote deletion.
 
-## Technician checklists by branch
+## Checklist tab inside each branch
 
-Add an empty **Checklist tecnici** area linked to each branch and its rollout/installation activity. This phase establishes only the navigation/space and the association point; do not create checklist templates, checklist items, sample tasks, or assumed procedures yet. The user will provide the real checklist used by technicians before checklist content and workflow are designed.
+Place **Checklist** as a tab inside the relevant branch detail page, so each branch's technician checklist remains organized under that branch rather than in a separate global area. For now, create only the empty tab/placeholder and its branch association. Do not add example tasks, templates, procedures, or checklist items until the user uploads the actual checklist used by technicians.
 
-Keep the area ready to associate a checklist with a branch and an installation/rollout activity. Leave the checklist content intentionally empty until the user's source checklist is supplied.
+The future checklist content and workflow must be scoped to the selected branch and its installation/rollout activity. Any cross-branch overview on the Dashboard can be considered later, but the canonical checklist belongs to the branch detail page.
 
 ## Dashboard — Device da gestire
 
@@ -127,7 +127,7 @@ Only label records “Asset Client only” after a complete successful sync for 
 - Show diff categories and source values; add CSV export if useful.
 - Add an alert queue for Webex serials absent from Asset Client, with acknowledge/resolve and full history.
 - Add the Dashboard **Device da gestire** count and work queue, combining incomplete Asset Client records with unresolved Webex matching, assignment, branch and lifecycle findings.
-- Add only the empty **Checklist tecnici** area and its branch/rollout association point. Do not implement templates, tasks, status workflow or sample checklist content until the user provides the checklist currently used by technicians.
+- Add only an empty **Checklist** tab inside each branch detail page, scoped to that branch. Do not implement templates, tasks, status workflow or sample checklist content until the user provides the checklist currently used by technicians.
 - Show product lifecycle milestones and their provenance, last-checked time, and upcoming lifecycle warnings.
 - Audit configuration changes, connection tests and sync runs without recording secrets.
 
@@ -152,7 +152,7 @@ Only label records “Asset Client only” after a complete successful sync for 
 - Branch truth continues to come from NETWORK.
 - Admin can see sync history, errors, and comparison results.
 - Dashboard **Device da gestire** lists unresolved incomplete records/findings with reasons and safe, reviewable completion actions.
-- The empty **Checklist tecnici** area is visible and associated with a branch/rollout; no checklist content or workflow is assumed before the user supplies the real checklist.
+- Each branch detail page has an empty **Checklist** tab associated with that branch; no checklist content or workflow is assumed before the user supplies the real checklist.
 - Automated tests verify that the connector never invokes Webex write operations.
 
 ## Out of scope for phase one
