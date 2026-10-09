@@ -736,7 +736,7 @@ app.post('/api/admin/webex/sync', requireAuth, requireAdmin, async (req,res,next
         const serial = d.serialNumber;
         const normalized = normalizeSerial(serial);
         await client.query(`INSERT INTO webex_device_snapshots(webex_device_id,serial_number,normalized_serial,product,model,mac,device_type,connection_status,person_id,person_email,person_name,workspace_id,workspace_name,location_id,location_name,suggested_branch_name,display_name,raw_safe,last_seen_at,last_sync_run_id)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,NOW(),$18)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,NOW(),$19)
           ON CONFLICT(webex_device_id) DO UPDATE SET serial_number=EXCLUDED.serial_number,normalized_serial=EXCLUDED.normalized_serial,product=EXCLUDED.product,model=EXCLUDED.model,mac=EXCLUDED.mac,device_type=EXCLUDED.device_type,connection_status=EXCLUDED.connection_status,person_id=EXCLUDED.person_id,person_email=EXCLUDED.person_email,person_name=EXCLUDED.person_name,workspace_id=EXCLUDED.workspace_id,workspace_name=EXCLUDED.workspace_name,location_id=EXCLUDED.location_id,location_name=EXCLUDED.location_name,suggested_branch_name=EXCLUDED.suggested_branch_name,display_name=EXCLUDED.display_name,raw_safe=EXCLUDED.raw_safe,last_seen_at=NOW(),last_sync_run_id=EXCLUDED.last_sync_run_id`,
           [d.id,serial||null,normalized||null,d.product,d.model,d.mac,d.deviceType,d.connectionStatus,d.personId,d.personEmail,d.personName,d.workspaceId,d.workspaceName,d.locationId,d.locationName,d.suggestedBranchName,d.displayName,JSON.stringify(d),runId]);
         const alertType = !normalized ? 'serial_unavailable' : !knownSerials.has(normalized) ? 'unknown_serial' : null;
