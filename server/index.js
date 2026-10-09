@@ -121,6 +121,61 @@ async function initialize() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS webex_sync_runs (
+      id BIGSERIAL PRIMARY KEY,
+      status TEXT NOT NULL CHECK (status IN ('running','success','error')),
+      started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      finished_at TIMESTAMPTZ,
+      records_read INTEGER NOT NULL DEFAULT 0,
+      error_message TEXT,
+      created_by BIGINT REFERENCES app_users(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS webex_sync_runs_started_idx ON webex_sync_runs(started_at DESC);
+    CREATE TABLE IF NOT EXISTS webex_device_snapshots (
+      webex_device_id TEXT PRIMARY KEY,
+      serial_number TEXT,
+      normalized_serial TEXT,
+      product TEXT,
+      model TEXT,
+      mac TEXT,
+      device_type TEXT,
+      connection_status TEXT,
+      person_id TEXT,
+      person_email TEXT,
+      workspace_id TEXT,
+      workspace_name TEXT,
+      location_id TEXT,
+      display_name TEXT,
+      raw_safe JSONB NOT NULL DEFAULT '{}'::jsonb,
+      first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_sync_run_id BIGINT REFERENCES webex_sync_runs(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS webex_device_serial_idx ON webex_device_snapshots(normalized_serial);
+    CREATE TABLE IF NOT EXISTS webex_device_alerts (
+      id BIGSERIAL PRIMARY KEY,
+      alert_type TEXT NOT NULL CHECK (alert_type IN ('unknown_serial','serial_unavailable')),
+      webex_device_id TEXT NOT NULL,
+      normalized_serial TEXT NOT NULL DEFAULT '',
+      serial_number TEXT,
+      product TEXT,
+      mac TEXT,
+      display_name TEXT,
+      person_email TEXT,
+      workspace_id TEXT,
+      workspace_name TEXT,
+      status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','acknowledged','resolved')),
+      resolution_reason TEXT,
+      first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      resolved_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(alert_type, webex_device_id, normalized_serial)
+    );
+    CREATE INDEX IF NOT EXISTS webex_device_alerts_status_idx ON webex_device_alerts(status, last_seen_at DESC);
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version TEXT PRIMARY KEY,
       applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -431,6 +486,155 @@ app.put('/api/inventory-state',requireAuth,requireOperator,async(req,res,next)=>
  const next=actual+1;await c.query('INSERT INTO shared_inventory_state(id,state,revision,updated_at,updated_by) VALUES(1,$1::jsonb,$2,NOW(),$3) ON CONFLICT(id) DO UPDATE SET state=EXCLUDED.state,revision=EXCLUDED.revision,updated_at=NOW(),updated_by=EXCLUDED.updated_by',[encoded,next,req.user.id]);await c.query('COMMIT');res.json({revision:next,updatedAt:new Date().toISOString()});
  }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
 }catch(e){next(e);}});
+
+
+// Read-only operational health checks. Missing deployment metrics are reported as unavailable.
+app.get('/api/admin/system-status', requireAuth, requireAdmin, async (_req, res) => {
+  const checkedAt = new Date().toISOString();
+  const checks = [];
+  checks.push({ id: 'api', label: 'Applicazione e API', status: 'ok', message: 'Endpoint API raggiungibile', checkedAt, details: { uptimeSeconds: Math.floor(process.uptime()), nodeVersion: process.version } });
+  try {
+    const started = Date.now();
+    await pool.query('SELECT 1');
+    checks.push({ id: 'database', label: 'Database', status: 'ok', message: 'Connessione e query di verifica riuscite', checkedAt, details: { latencyMs: Date.now() - started } });
+  } catch {
+    checks.push({ id: 'database', label: 'Database', status: 'error', message: 'Connessione o query di verifica non riuscita', checkedAt, details: {} });
+  }
+  try {
+    const stat = await fs.statfs(process.cwd());
+    const totalBytes = Number(stat.blocks) * Number(stat.bsize);
+    const availableBytes = Number(stat.bavail) * Number(stat.bsize);
+    const usedPercent = totalBytes > 0 ? Math.round(((totalBytes - availableBytes) / totalBytes) * 1000) / 10 : null;
+    const status = usedPercent === null ? 'unknown' : usedPercent >= 95 ? 'error' : usedPercent >= 85 ? 'warning' : 'ok';
+    checks.push({ id: 'disk', label: 'Spazio disco', status, message: usedPercent === null ? 'Metriche disco non disponibili' : usedPercent >= 95 ? 'Spazio disco critico' : usedPercent >= 85 ? 'Spazio disco in esaurimento' : 'Spazio disco nella soglia prevista', checkedAt, details: { totalBytes, availableBytes, usedPercent, path: process.cwd() } });
+  } catch {
+    checks.push({ id: 'disk', label: 'Spazio disco', status: 'unknown', message: 'Metriche disco non disponibili in questo ambiente', checkedAt, details: {} });
+  }
+  const configured = Boolean(process.env.WEBEX_ACCESS_TOKEN);
+  let webex = { id: 'webex', label: 'Connettore Webex', status: 'unknown', message: configured ? 'Token configurato; sincronizzazione da verificare' : 'Non configurato: manca WEBEX_ACCESS_TOKEN', checkedAt, details: { configured } };
+  try {
+    const r = await pool.query('SELECT status, started_at, finished_at, records_read, error_message FROM webex_sync_runs ORDER BY id DESC LIMIT 1');
+    if (r.rowCount) {
+      const last = r.rows[0];
+      webex = { ...webex, status: last.status === 'success' ? 'ok' : last.status === 'error' ? 'error' : 'warning', message: last.status === 'success' ? 'Ultima sincronizzazione completata' : last.error_message || 'Ultima sincronizzazione non completata', details: { ...webex.details, lastStatus: last.status, startedAt: last.started_at, finishedAt: last.finished_at, recordsRead: last.records_read } };
+    }
+  } catch {
+    webex = { ...webex, status: 'unknown', message: 'Stato sincronizzazione non disponibile', details: { configured } };
+  }
+  try {
+    const r = await pool.query('SELECT status, started_at, finished_at, records_read, error_message FROM webex_sync_runs ORDER BY id DESC LIMIT 10');
+    checks.push({ id: 'jobs', label: 'Sincronizzazioni e processi', status: r.rows.some(x => x.status === 'error') ? 'warning' : 'ok', message: r.rowCount ? 'Storico delle sincronizzazioni disponibile' : 'Nessuna sincronizzazione eseguita', checkedAt, details: { recentRuns: r.rows } });
+  } catch {
+    checks.push({ id: 'jobs', label: 'Sincronizzazioni e processi', status: 'unknown', message: 'Storico processi non disponibile', checkedAt, details: {} });
+  }
+  checks.push(webex);
+  const order = { error: 0, warning: 1, unknown: 2, ok: 3 };
+  res.json({ checkedAt, overall: checks.some(x => x.status === 'error') ? 'error' : checks.some(x => x.status === 'warning') ? 'warning' : checks.some(x => x.status === 'unknown') ? 'unknown' : 'ok', checks: checks.sort((a,b) => (order[a.status] ?? 2) - (order[b.status] ?? 2)) });
+});
+
+function normalizeSerial(value) {
+  return String(value || '').trim().replace(/\\s+/g, '').toUpperCase();
+}
+function webexSafeDevice(d) {
+  return {
+    id: String(d.id || ''),
+    serialNumber: typeof d.serial === 'string' ? d.serial.trim() : '',
+    product: cleanString(d.product, 200),
+    model: cleanString(d.model, 200),
+    mac: cleanString(d.mac, 100),
+    deviceType: cleanString(d.type, 100),
+    connectionStatus: cleanString(d.connectionStatus, 100),
+    personId: cleanString(d.personId, 200),
+    personEmail: cleanString(d.personEmail, 320),
+    workspaceId: cleanString(d.workspaceId, 200),
+    workspaceName: cleanString(d.workspaceName, 200),
+    locationId: cleanString(d.locationId, 200),
+    displayName: cleanString(d.displayName || d.name, 200)
+  };
+}
+app.get('/api/admin/webex/status', requireAuth, requireAdmin, async (_req,res,next) => {
+  try {
+    const [run, counts, alerts] = await Promise.all([
+      pool.query('SELECT id,status,started_at,finished_at,records_read,error_message FROM webex_sync_runs ORDER BY id DESC LIMIT 1'),
+      pool.query('SELECT COUNT(*)::int AS devices FROM webex_device_snapshots'),
+      pool.query("SELECT status,COUNT(*)::int AS count FROM webex_device_alerts GROUP BY status")
+    ]);
+    res.json({ configured: Boolean(process.env.WEBEX_ACCESS_TOKEN), lastRun: run.rows[0] || null, deviceCount: counts.rows[0].devices, alerts: alerts.rows, message: process.env.WEBEX_ACCESS_TOKEN ? null : 'Configura WEBEX_ACCESS_TOKEN nel secret store dell’ambiente server per abilitare la sincronizzazione.' });
+  } catch(e) { next(e); }
+});
+app.post('/api/admin/webex/sync', requireAuth, requireAdmin, async (req,res,next) => {
+  if (!process.env.WEBEX_ACCESS_TOKEN) return res.status(409).json({ error: 'Connettore non configurato: imposta WEBEX_ACCESS_TOKEN lato server.' });
+  const run = await pool.query("INSERT INTO webex_sync_runs(status,created_by) VALUES('running',$1) RETURNING id", [req.user.id]);
+  const runId = run.rows[0].id;
+  try {
+    let nextUrl = 'https://webexapis.com/v1/devices?max=100';
+    const devices = [];
+    let pages = 0;
+    while (nextUrl) {
+      if (++pages > 1000) throw new Error('Limite di paginazione superato');
+      const response = await fetch(nextUrl, { headers: { Authorization: 'Bearer ' + process.env.WEBEX_ACCESS_TOKEN, Accept: 'application/json' }, signal: AbortSignal.timeout(20000) });
+      if (!response.ok) {
+        const status = response.status;
+        throw new Error(status === 401 || status === 403 ? 'Autorizzazione Webex non valida o permessi di lettura insufficienti (HTTP ' + status + ')' : 'API Webex ha restituito HTTP ' + status);
+      }
+      const body = await response.json();
+      if (!Array.isArray(body.items)) throw new Error('Risposta API Webex inattesa: elenco dispositivi assente');
+      devices.push(...body.items.map(webexSafeDevice).filter(d => d.id));
+      const link = response.headers.get('link') || '';
+      const match = link.match(/<([^>]+)>;\\s*rel="?next"?/i);
+      nextUrl = match ? match[1] : '';
+      if (devices.length > 100000) throw new Error('Limite di dispositivi superato');
+    }
+    const inventory = await pool.query('SELECT state FROM shared_inventory_state WHERE id=1');
+    const assetDevices = inventory.rows[0]?.state?.devices || [];
+    const knownSerials = new Set(assetDevices.map(d => normalizeSerial(d.serial)).filter(Boolean));
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const d of devices) {
+        const serial = d.serialNumber;
+        const normalized = normalizeSerial(serial);
+        await client.query(`INSERT INTO webex_device_snapshots(webex_device_id,serial_number,normalized_serial,product,model,mac,device_type,connection_status,person_id,person_email,workspace_id,workspace_name,location_id,display_name,raw_safe,last_seen_at,last_sync_run_id)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,NOW(),$16)
+          ON CONFLICT(webex_device_id) DO UPDATE SET serial_number=EXCLUDED.serial_number,normalized_serial=EXCLUDED.normalized_serial,product=EXCLUDED.product,model=EXCLUDED.model,mac=EXCLUDED.mac,device_type=EXCLUDED.device_type,connection_status=EXCLUDED.connection_status,person_id=EXCLUDED.person_id,person_email=EXCLUDED.person_email,workspace_id=EXCLUDED.workspace_id,workspace_name=EXCLUDED.workspace_name,location_id=EXCLUDED.location_id,display_name=EXCLUDED.display_name,raw_safe=EXCLUDED.raw_safe,last_seen_at=NOW(),last_sync_run_id=EXCLUDED.last_sync_run_id`,
+          [d.id,serial||null,normalized||null,d.product,d.model,d.mac,d.deviceType,d.connectionStatus,d.personId,d.personEmail,d.workspaceId,d.workspaceName,d.locationId,d.displayName,JSON.stringify(d),runId]);
+        const alertType = !normalized ? 'serial_unavailable' : !knownSerials.has(normalized) ? 'unknown_serial' : null;
+        if (alertType) {
+          await client.query(`INSERT INTO webex_device_alerts(alert_type,webex_device_id,normalized_serial,serial_number,product,mac,display_name,person_email,workspace_id,workspace_name,status)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'new')
+            ON CONFLICT(alert_type,webex_device_id,normalized_serial) DO UPDATE SET serial_number=EXCLUDED.serial_number,product=EXCLUDED.product,mac=EXCLUDED.mac,display_name=EXCLUDED.display_name,person_email=EXCLUDED.person_email,workspace_id=EXCLUDED.workspace_id,workspace_name=EXCLUDED.workspace_name,last_seen_at=NOW(),updated_at=NOW(),
+              status=CASE WHEN webex_device_alerts.status='resolved' THEN 'new' ELSE webex_device_alerts.status END,
+              resolved_at=CASE WHEN webex_device_alerts.status='resolved' THEN NULL ELSE webex_device_alerts.resolved_at END`,
+            [alertType,d.id,normalized,serial||null,d.product,d.mac,d.displayName,d.personEmail,d.workspaceId,d.workspaceName]);
+        } else {
+          await client.query("UPDATE webex_device_alerts SET status='resolved',resolution_reason='serial matched in Asset Client',resolved_at=NOW(),updated_at=NOW() WHERE alert_type='unknown_serial' AND webex_device_id=$1 AND status<>'resolved'",[d.id]);
+        }
+      }
+      await client.query("UPDATE webex_sync_runs SET status='success',finished_at=NOW(),records_read=$1 WHERE id=$2",[devices.length,runId]);
+      await client.query('COMMIT');
+    } catch(e) { await client.query('ROLLBACK').catch(()=>{}); throw e; } finally { client.release(); }
+    res.json({ status: 'success', runId, recordsRead: devices.length });
+  } catch(e) {
+    await pool.query("UPDATE webex_sync_runs SET status='error',finished_at=NOW(),error_message=$1 WHERE id=$2",[String(e.message || 'Errore sincronizzazione').slice(0,500),runId]).catch(()=>{});
+    next(e);
+  }
+});
+app.get('/api/admin/webex/alerts', requireAuth, requireAdmin, async (req,res,next) => {
+  try {
+    const status = ['new','acknowledged','resolved'].includes(req.query.status) ? req.query.status : null;
+    const r = await pool.query(`SELECT id,alert_type AS "alertType",webex_device_id AS "webexDeviceId",serial_number AS "serialNumber",product,mac,display_name AS "displayName",person_email AS "personEmail",workspace_id AS "workspaceId",workspace_name AS "workspaceName",status,resolution_reason AS "resolutionReason",first_seen_at AS "firstSeenAt",last_seen_at AS "lastSeenAt",updated_at AS "updatedAt" FROM webex_device_alerts WHERE ($1::text IS NULL OR status=$1) ORDER BY CASE status WHEN 'new' THEN 0 WHEN 'acknowledged' THEN 1 ELSE 2 END,last_seen_at DESC LIMIT 1000`,[status]);
+    res.json({ alerts: r.rows });
+  } catch(e) { next(e); }
+});
+app.patch('/api/admin/webex/alerts/:id', requireAuth, requireAdmin, async (req,res,next) => {
+  try {
+    const status = req.body?.status;
+    if (!['acknowledged','resolved','new'].includes(status)) return res.status(400).json({ error: 'Stato avviso non valido' });
+    const r = await pool.query("UPDATE webex_device_alerts SET status=$1,resolution_reason=$2,resolved_at=CASE WHEN $1='resolved' THEN NOW() ELSE NULL END,updated_at=NOW() WHERE id=$3 RETURNING id,status,resolution_reason AS \"resolutionReason\",updated_at AS \"updatedAt\"",[status,cleanString(req.body?.resolutionReason,500),Number(req.params.id)]);
+    if (!r.rowCount) return res.status(404).json({ error: 'Avviso non trovato' });
+    res.json({ alert: r.rows[0] });
+  } catch(e) { next(e); }
+});
 
 app.use((error, _req, res, _next) => {
   console.error('API error:', error.message);
