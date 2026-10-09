@@ -14,6 +14,10 @@
 - A **Checklist** tab inside each branch detail page. It intentionally remains empty until the user supplies the technician checklist.
 - Administrative actions flow through the existing audit middleware.
 
+## Role test mode
+
+An administrator can select **Amministratore** or **Operatore** from the account menu to test role-based navigation and server permissions without changing the stored account role or creating another user. The effective role is applied server-side for the current session, the UI shows a persistent **MODALITÀ TEST** banner, and the user can exit with **Termina test e torna admin**. Starting and stopping the mode is recorded by the existing audit middleware. Only the original authenticated administrator can start or stop this mode; it is not a way for an operator to gain administrator access. Use a non-production environment for destructive workflow testing, because actions allowed by the simulated role still affect the connected environment.
+
 ## Configuration
 
 Set `WEBEX_ACCESS_TOKEN` in the server's secret store/environment. Do not commit a real token to `.env`, source control, browser storage or screenshots. Use a token authorized for the target organization and the minimum read scopes needed for the Devices API. To enrich assignment and location data, the token may also need read scopes for workspaces, people and locations. The connector does not request or use Webex write operations.
