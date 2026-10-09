@@ -548,7 +548,7 @@ app.get('/api/admin/system-status', requireAuth, requireAdmin, async (_req, res)
 });
 
 function normalizeSerial(value) {
-  return String(value || '').trim().replace(/\\s+/g, '').toUpperCase();
+  return String(value || '').trim().replace(/\s+/g, '').toUpperCase();
 }
 function webexSafeDevice(d) {
   return {
@@ -630,7 +630,7 @@ app.post('/api/admin/webex/sync', requireAuth, requireAdmin, async (req,res,next
     const workspaceById = new Map(workspaces.map(x => [String(x.id), x]));
     const personById = new Map(people.map(x => [String(x.id), x]));
     const locationById = new Map(locations.map(x => [String(x.id), x]));
-    const normLabel = value => String(value || '').trim().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLocaleLowerCase('it').replace(/[^a-z0-9]/g,'');
+    const normLabel = value => String(value || '').trim().normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('it').replace(/[^a-z0-9]/g,'');
     const inventoryBeforeBranchMatch = await pool.query('SELECT state FROM shared_inventory_state WHERE id=1');
     const knownBranches = inventoryBeforeBranchMatch.rows[0]?.state?.branches || [];
     for (const d of devices) {
