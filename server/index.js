@@ -71,12 +71,15 @@ async function initialize() {
       password_hash TEXT NOT NULL,
       role TEXT NOT NULL CHECK (role IN ('admin', 'operator')),
       active BOOLEAN NOT NULL DEFAULT TRUE,
+      must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       last_login_at TIMESTAMPTZ
     );
     CREATE INDEX IF NOT EXISTS app_users_active_idx ON app_users(active);
   `);
+
+  await pool.query('ALTER TABLE app_users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE');
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -106,26 +109,32 @@ async function initialize() {
   const username = String(process.env.BOOTSTRAP_ADMIN_USERNAME || '').trim();
   const password = String(process.env.BOOTSTRAP_ADMIN_PASSWORD || '');
   if (username && password) {
-    if (username.length < 3 || username.length > 64 || password.length < 12) {
-      throw new Error('Bootstrap admin: username deve avere 3-64 caratteri e password almeno 12');
+    if (username.length < 3 || username.length > 64 || !validPassword(password)) {
+      throw new Error('Bootstrap admin: password con almeno 12 caratteri, maiuscola, numero e carattere speciale');
     }
     const hash = await argon2.hash(password, { type: argon2.argon2id });
     await pool.query(
-      `INSERT INTO app_users(username,password_hash,role) VALUES($1,$2,'admin')
+      `INSERT INTO app_users(username,password_hash,role,must_change_password) VALUES($1,$2,'admin',TRUE)
        ON CONFLICT (username) DO NOTHING`,
       [username, hash]
     );
   }
 }
 
+function validPassword(value) {
+  return typeof value === 'string' && value.length >= 12 && value.length <= 1024 && /[A-Z]/.test(value) && /[0-9]/.test(value) && /[^A-Za-z0-9]/.test(value);
+}
+function passwordPolicyMessage() {
+  return 'La password deve avere almeno 12 caratteri, una maiuscola, un numero e un carattere speciale';
+}
 function publicUser(user) {
-  return { id: user.id, username: user.username, role: user.role };
+  return { id: user.id, username: user.username, role: user.role, mustChangePassword: Boolean(user.must_change_password) };
 }
 async function requireAuth(req, res, next) {
   if (!req.session.userId) return res.status(401).json({ error: 'Autenticazione richiesta' });
   try {
     const result = await pool.query(
-      'SELECT id, username, role, active FROM app_users WHERE id=$1',
+      'SELECT id, username, role, active, must_change_password FROM app_users WHERE id=$1',
       [req.session.userId]
     );
     const user = result.rows[0];
@@ -134,6 +143,9 @@ async function requireAuth(req, res, next) {
       return res.status(401).json({ error: 'Sessione non valida' });
     }
     req.user = user;
+    if (user.must_change_password && !['/api/auth/me', '/api/auth/change-password', '/api/auth/logout'].includes(req.path)) {
+      return res.status(403).json({ error: 'Devi cambiare la password prima di continuare', code: 'PASSWORD_CHANGE_REQUIRED' });
+    }
     next();
   } catch (error) { next(error); }
 }
@@ -158,7 +170,7 @@ app.post('/api/auth/login', loginLimiter, async (req, res, next) => {
       return res.status(400).json({ error: 'Username e password obbligatori' });
     }
     const result = await pool.query(
-      'SELECT id, username, password_hash, role, active FROM app_users WHERE username=$1',
+      'SELECT id, username, password_hash, role, active, must_change_password FROM app_users WHERE username=$1',
       [username]
     );
     const user = result.rows[0];
@@ -169,6 +181,20 @@ app.post('/api/auth/login', loginLimiter, async (req, res, next) => {
     req.session.userId = user.id;
     await pool.query('UPDATE app_users SET last_login_at=NOW() WHERE id=$1', [user.id]);
     res.json({ user: publicUser(user) });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/auth/change-password', requireAuth, async (req, res, next) => {
+  try {
+    const password = req.body?.password;
+    const confirmation = req.body?.confirmation;
+    if (!validPassword(password)) return res.status(400).json({ error: passwordPolicyMessage() });
+    if (password !== confirmation) return res.status(400).json({ error: 'Le due password non coincidono' });
+    const hash = await argon2.hash(password, { type: argon2.argon2id });
+    const result = await pool.query('UPDATE app_users SET password_hash=$1, must_change_password=FALSE, updated_at=NOW() WHERE id=$2 AND active=TRUE RETURNING id,username,role,active,must_change_password', [hash, req.user.id]);
+    if (!result.rowCount) return res.status(401).json({ error: 'Account non disponibile' });
+    req.user = result.rows[0];
+    res.json({ user: publicUser(req.user) });
   } catch (error) { next(error); }
 });
 
@@ -194,13 +220,11 @@ app.post('/api/admin/users', requireAuth, requireAdmin, async (req, res, next) =
   try {
     const { username, password, role } = req.body || {};
     if (!validUsername(username)) return res.status(400).json({ error: 'Username: 3-64 caratteri alfanumerici, punto, trattino o underscore' });
-    if (typeof password !== 'string' || password.length < 12 || password.length > 1024) {
-      return res.status(400).json({ error: 'La password deve contenere almeno 12 caratteri' });
-    }
+    if (!validPassword(password)) return res.status(400).json({ error: passwordPolicyMessage() });
     if (!['admin', 'operator'].includes(role)) return res.status(400).json({ error: 'Ruolo non valido' });
     const hash = await argon2.hash(password, { type: argon2.argon2id });
     const result = await pool.query(
-      'INSERT INTO app_users(username,password_hash,role) VALUES($1,$2,$3) ON CONFLICT(username) DO NOTHING RETURNING id,username,role,active,created_at',
+      'INSERT INTO app_users(username,password_hash,role,must_change_password) VALUES($1,$2,$3,TRUE) ON CONFLICT(username) DO NOTHING RETURNING id,username,role,active,created_at,must_change_password',
       [username, hash, role]
     );
     if (!result.rowCount) return res.status(409).json({ error: 'Username già esistente' });
@@ -217,9 +241,7 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, async (req, res, ne
       return res.status(400).json({ error: 'Nessuna modifica richiesta' });
     }
     if (role !== undefined && !['admin', 'operator'].includes(role)) return res.status(400).json({ error: 'Ruolo non valido' });
-    if (password !== undefined && (typeof password !== 'string' || password.length < 12 || password.length > 1024)) {
-      return res.status(400).json({ error: 'La password deve contenere almeno 12 caratteri' });
-    }
+    if (password !== undefined && !validPassword(password)) return res.status(400).json({ error: passwordPolicyMessage() });
     if (active !== undefined && typeof active !== 'boolean') return res.status(400).json({ error: 'active deve essere booleano' });
     if (id === Number(req.user.id) && (active === false || role === 'operator')) {
       return res.status(400).json({ error: 'Non puoi disattivare o declassare il tuo account' });
@@ -234,7 +256,10 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, async (req, res, ne
     const set = (column, value) => { values.push(value); updates.push(column + '=$' + values.length); };
     if (active !== undefined) set('active', active);
     if (role !== undefined) set('role', role);
-    if (password !== undefined) set('password_hash', await argon2.hash(password, { type: argon2.argon2id }));
+    if (password !== undefined) {
+      set('password_hash', await argon2.hash(password, { type: argon2.argon2id }));
+      set('must_change_password', true);
+    }
     set('updated_at', new Date());
     values.push(id);
     const result = await pool.query(
