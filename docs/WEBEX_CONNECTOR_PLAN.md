@@ -18,6 +18,7 @@ Add **Amministrazione → Connettori → Webex** with:
 - A persistent alert when Webex reports a device serial that is not present in Asset Client; show serial, model, Webex device ID, source/type, first-seen time, last-seen time and a link to review.
 - Alert lifecycle: new, acknowledged, resolved; prevent duplicate active alerts for the same normalized serial/device identity, but retain alert history.
 - A lifecycle view for End-of-Life dates and other available milestones, with source and last-verified date.
+- A Dashboard entry **Device da gestire** with a live count and direct access to devices whose Asset Client records are incomplete or require a decision.
 - Per-row source details and a clear distinction between confirmed values and suggestions.
 - A run history; record administrative sync actions in the existing audit log.
 
@@ -54,6 +55,18 @@ Only administrators can configure or run a sync. Operators do not get access to 
 - Keep Asset Client SKU, manufacturer serial, MAC, and external Webex ID as distinct fields. Never treat a SKU as a serial or generate identifiers.
 - A sync updates only the connector snapshot and sync metadata. Existing asset, contract, branch, activation, financial, and lifecycle data remain unchanged.
 - Preserve source timestamps and last successful sync. API omissions/errors must not be interpreted as remote deletion.
+
+## Dashboard — Device da gestire
+
+Add a dedicated **Device da gestire** item to the Dashboard, with a count of unresolved items and a filtered work queue. The queue should include:
+- Asset Client devices with required fields missing (for example serial, product/SKU, branch, assignment, activation or contract fields where applicable).
+- Devices observed in Webex whose serial is not found in Asset Client.
+- Devices matched by serial but missing a reliable branch association or with a Webex-versus-Asset Client assignment mismatch.
+- Devices with missing Webex serials, ambiguous matches, duplicate identifiers, or lifecycle data requiring review.
+
+Each row should show the device/serial, model, Webex identity and assigned person/workspace where available, candidate branch, missing fields/reason, source and last-seen/sync date. Provide filters by issue type, branch and source, plus a direct action to open the device record and complete the missing information. Where confidence is high, show suggested values from Webex as prefilled proposals; require explicit confirmation before changing authoritative Asset Client fields. Never fill branch from free text unless it resolves through a configured mapping to a known NETWORK branch. Mark an item complete only when its required fields/issues are resolved; retain audit history for changes. Avoid duplicate queue entries by grouping multiple findings for the same asset into one actionable row.
+
+The Dashboard count must reflect unresolved actionable items, not all devices in Webex. A failed or partial sync must be clearly marked stale and must not automatically close work items.
 
 ## Serial mismatch alerts
 
@@ -106,6 +119,7 @@ Only label records “Asset Client only” after a complete successful sync for 
 - Implement stable-ID/MAC matching and clearly labeled weaker suggestions.
 - Show diff categories and source values; add CSV export if useful.
 - Add an alert queue for Webex serials absent from Asset Client, with acknowledge/resolve and full history.
+- Add the Dashboard **Device da gestire** count and work queue, combining incomplete Asset Client records with unresolved Webex matching, assignment, branch and lifecycle findings.
 - Show product lifecycle milestones and their provenance, last-checked time, and upcoming lifecycle warnings.
 - Audit configuration changes, connection tests and sync runs without recording secrets.
 
@@ -129,6 +143,7 @@ Only label records “Asset Client only” after a complete successful sync for 
 - Match decisions are explainable and uncertain matches require human review.
 - Branch truth continues to come from NETWORK.
 - Admin can see sync history, errors, and comparison results.
+- Dashboard **Device da gestire** lists unresolved incomplete records/findings with reasons and safe, reviewable completion actions.
 - Automated tests verify that the connector never invokes Webex write operations.
 
 ## Out of scope for phase one
