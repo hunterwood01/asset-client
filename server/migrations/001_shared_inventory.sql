@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS branches (
   name TEXT NOT NULL,
   code TEXT UNIQUE,
   active BOOLEAN NOT NULL DEFAULT TRUE,
+  monthly_revenue NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (monthly_revenue >= 0),
   phone_prefix TEXT NOT NULL DEFAULT '',
   network_lan TEXT NOT NULL DEFAULT '',
   network_services TEXT NOT NULL DEFAULT '',
