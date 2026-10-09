@@ -64,7 +64,6 @@ const loginLimiter = rateLimit({
 });
 
 async function initialize() {
-  await pool.query(`CREATE TABLE IF NOT EXISTS shared_inventory_state (id SMALLINT PRIMARY KEY CHECK(id=1), state JSONB NOT NULL, revision BIGINT NOT NULL DEFAULT 1, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_by BIGINT REFERENCES app_users(id) ON DELETE SET NULL)`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS app_users (
       id BIGSERIAL PRIMARY KEY,
@@ -85,14 +84,24 @@ async function initialize() {
       applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
-  const migrationVersion = '001_shared_inventory';
-  const applied = await pool.query('SELECT 1 FROM schema_migrations WHERE version=$1', [migrationVersion]);
-  if (!applied.rowCount) {
-    const migrationPath = path.join(__dirname, 'migrations', migrationVersion + '.sql');
-    const migrationSql = await fs.readFile(migrationPath, 'utf8');
-    await pool.query(migrationSql);
-    await pool.query('INSERT INTO schema_migrations(version) VALUES($1) ON CONFLICT DO NOTHING', [migrationVersion]);
+  for (const migrationVersion of ['001_shared_inventory', '002_finance_shared_state']) {
+    const applied = await pool.query('SELECT 1 FROM schema_migrations WHERE version=$1', [migrationVersion]);
+    if (!applied.rowCount) {
+      const migrationPath = path.join(__dirname, 'migrations', migrationVersion + '.sql');
+      const migrationSql = await fs.readFile(migrationPath, 'utf8');
+      await pool.query(migrationSql);
+      await pool.query('INSERT INTO schema_migrations(version) VALUES($1) ON CONFLICT DO NOTHING', [migrationVersion]);
+    }
   }
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS shared_inventory_state (
+      id SMALLINT PRIMARY KEY CHECK (id = 1),
+      state JSONB NOT NULL,
+      revision BIGINT NOT NULL DEFAULT 1,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_by BIGINT REFERENCES app_users(id) ON DELETE SET NULL
+    )
+  `);
 
   const username = String(process.env.BOOTSTRAP_ADMIN_USERNAME || '').trim();
   const password = String(process.env.BOOTSTRAP_ADMIN_PASSWORD || '');
