@@ -57,6 +57,27 @@ Only administrators can configure or run a sync. Operators do not get access to 
 - A sync updates only the connector snapshot and sync metadata. Existing asset, contract, branch, activation, financial, and lifecycle data remain unchanged.
 - Preserve source timestamps and last successful sync. API omissions/errors must not be interpreted as remote deletion.
 
+## Administration — System status
+
+Add an **Amministrazione → Stato sistema** area that gives administrators a quick overview of whether Asset Client and its integrations are operating normally. This is an operational health page, distinct from the audit log (which records who changed what).
+
+Show individual status cards/checks with state **OK / Warning / Error / Unknown**, last checked time, a concise explanation, and actionable diagnostic details where safe. Include at minimum:
+
+- **Webex connector:** connection/authentication status, last successful sync, sync age/duration, records read, partial failures and API/rate-limit errors. If the connector is not configured, show “Not configured” rather than an error.
+- **Application/API:** server availability and application health endpoint; distinguish a reachable frontend from a failing backend/API.
+- **Database:** connectivity and a lightweight health query; do not expose connection strings or credentials.
+- **Disk/storage:** available and total disk space, usage percentage and configured warning/critical thresholds, provided the deployment environment exposes reliable metrics. If not available, report “Metriche non disponibili” and document the required host/container monitoring integration; never fabricate values.
+- **Background jobs/synchronization:** last run, result, duration and last error for scheduled jobs that exist, including lifecycle/EoX refresh and Webex sync where implemented.
+- **Recent failures:** a short list of relevant recent connector/job/health-check failures with timestamps and correlation/run IDs where available.
+- **Last health check / refresh action:** allow an administrator to refresh checks on demand with rate limiting and timeouts.
+
+Security and behavior:
+- Admin-only access; redact tokens, secrets, database connection details and sensitive response bodies.
+- Health checks must be read-only, bounded in time and must not trigger an inventory mutation or a full sync unless the administrator explicitly presses the separate “Sincronizza ora” action.
+- Distinguish **Warning** from **Error** and show **Unknown/Unavailable** when a metric cannot be measured; never treat missing telemetry as proof that the system is healthy.
+- Record administrative refreshes and relevant configuration changes in the audit log, but do not flood the audit log with every automatic periodic probe.
+- Keep system health checks independent from audit history and the “Device da gestire” work queue.
+
 ## Checklist tab inside each branch
 
 Place **Checklist** as a tab inside the relevant branch detail page, so each branch's technician checklist remains organized under that branch rather than in a separate global area. For now, create only the empty tab/placeholder and its branch association. Do not add example tasks, templates, procedures, or checklist items until the user uploads the actual checklist used by technicians.
@@ -123,6 +144,7 @@ Only label records “Asset Client only” after a complete successful sync for 
 
 ### Phase 2 — matching and review UI
 - Add the admin connector page and sync status.
+- Add **Amministrazione → Stato sistema** with application/API, database, disk/storage (when measurable), Webex connector and background-job health checks, timestamps, warnings/errors and safe diagnostic details.
 - Implement stable-ID/MAC matching and clearly labeled weaker suggestions.
 - Show diff categories and source values; add CSV export if useful.
 - Add an alert queue for Webex serials absent from Asset Client, with acknowledge/resolve and full history.
@@ -151,6 +173,7 @@ Only label records “Asset Client only” after a complete successful sync for 
 - Match decisions are explainable and uncertain matches require human review.
 - Branch truth continues to come from NETWORK.
 - Admin can see sync history, errors, and comparison results.
+- Administrators can view system health checks with clear OK/Warning/Error/Unknown states and last-checked times; unavailable metrics are explicitly reported as unavailable.
 - Dashboard **Device da gestire** lists unresolved incomplete records/findings with reasons and safe, reviewable completion actions.
 - Each branch detail page has an empty **Checklist** tab associated with that branch; no checklist content or workflow is assumed before the user supplies the real checklist.
 - Automated tests verify that the connector never invokes Webex write operations.
