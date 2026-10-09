@@ -59,16 +59,9 @@ Only administrators can configure or run a sync. Operators do not get access to 
 
 ## Technician checklists by branch
 
-Add a dedicated **Checklist tecnici** area linked to each branch and rollout/installation activity. When work on a branch starts, an administrator or project coordinator can create an instance from a reusable checklist template; the technician sees only the relevant branch and assigned activity.
+Add an empty **Checklist tecnici** area linked to each branch and its rollout/installation activity. This phase establishes only the navigation/space and the association point; do not create checklist templates, checklist items, sample tasks, or assumed procedures yet. The user will provide the real checklist used by technicians before checklist content and workflow are designed.
 
-- Support reusable templates by activity type (for example, pre-installation readiness, network/connectivity, Webex Calling phones, RoomOS/meeting-room devices, validation and handover). Templates are examples to configure and validate with the project team, not assumed mandatory steps.
-- Each checklist item supports status (to do / done / blocked / not applicable), optional notes, responsible technician, timestamp and evidence attachment/link where supported.
-- Record branch, rollout/work-order identifier, template/version, assigned technicians, planned date, start/completion times and overall progress.
-- Include a branch-start readiness checklist and a separate post-installation verification/handover checklist, so preparation and completed work are not confused.
-- Allow technicians to save progress and resume later; show incomplete and blocked items prominently. A checklist cannot be marked complete while required items remain open unless an authorized user records an explicit exception with a reason.
-- Keep an audit trail for checklist creation, assignment, item changes, exceptions and completion. Preserve the checklist snapshot/version used for each rollout so later template edits do not rewrite historical work.
-- Dashboard should show upcoming/in-progress branch checklists, progress, blocked tasks and overdue work, with filters by branch, technician and rollout status.
-- Do not automatically change asset, contract or branch data simply because a checklist item is ticked. Explicitly defined actions can link to a device record, but data mutations remain separately authorized and audited.
+Keep the area ready to associate a checklist with a branch and an installation/rollout activity. Leave the checklist content intentionally empty until the user's source checklist is supplied.
 
 ## Dashboard — Device da gestire
 
@@ -134,7 +127,7 @@ Only label records “Asset Client only” after a complete successful sync for 
 - Show diff categories and source values; add CSV export if useful.
 - Add an alert queue for Webex serials absent from Asset Client, with acknowledge/resolve and full history.
 - Add the Dashboard **Device da gestire** count and work queue, combining incomplete Asset Client records with unresolved Webex matching, assignment, branch and lifecycle findings.
-- Add the **Checklist tecnici** area, reusable checklist templates, per-branch rollout instances, technician assignment, progress tracking, notes/evidence, blocked items and completion audit.
+- Add only the empty **Checklist tecnici** area and its branch/rollout association point. Do not implement templates, tasks, status workflow or sample checklist content until the user provides the checklist currently used by technicians.
 - Show product lifecycle milestones and their provenance, last-checked time, and upcoming lifecycle warnings.
 - Audit configuration changes, connection tests and sync runs without recording secrets.
 
@@ -159,7 +152,7 @@ Only label records “Asset Client only” after a complete successful sync for 
 - Branch truth continues to come from NETWORK.
 - Admin can see sync history, errors, and comparison results.
 - Dashboard **Device da gestire** lists unresolved incomplete records/findings with reasons and safe, reviewable completion actions.
-- Technicians can open their assigned branch checklist, save/resume progress, identify blocked items and complete the checklist with a traceable history.
+- The empty **Checklist tecnici** area is visible and associated with a branch/rollout; no checklist content or workflow is assumed before the user supplies the real checklist.
 - Automated tests verify that the connector never invokes Webex write operations.
 
 ## Out of scope for phase one
