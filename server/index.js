@@ -270,7 +270,10 @@ async function requireAuth(req, res, next) {
       req.session.destroy(() => {});
       return res.status(401).json({ error: 'Sessione non valida' });
     }
-    req.user = user;
+    req.realUser = user;
+    req.user = req.session.rolePreview && req.session.rolePreview.adminUserId === Number(user.id)
+      ? { ...user, role: req.session.rolePreview.role }
+      : user;
     if (user.must_change_password && !['/api/auth/me', '/api/auth/change-password', '/api/auth/logout'].includes(req.path)) {
       return res.status(403).json({ error: 'Devi cambiare la password prima di continuare', code: 'PASSWORD_CHANGE_REQUIRED' });
     }
@@ -326,7 +329,33 @@ app.post('/api/auth/change-password', requireAuth, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.get('/api/auth/me', requireAuth, (req, res) => res.json({ user: publicUser(req.user) }));
+app.get('/api/auth/me', requireAuth, (req, res) => res.json({
+  user: publicUser(req.user),
+  rolePreview: req.session.rolePreview ? { active: true, role: req.session.rolePreview.role, startedAt: req.session.rolePreview.startedAt } : { active: false }
+}));
+
+// Admin-only test mode: changes effective authorization role for this session, never the user's stored role.
+app.post('/api/admin/role-preview', requireAuth, async (req,res,next) => {
+  try {
+    if (req.realUser?.role !== 'admin') return res.status(403).json({ error: 'Solo un amministratore reale può avviare la simulazione ruoli' });
+    const role = req.body?.role;
+    if (!['admin','operator'].includes(role)) return res.status(400).json({ error: 'Ruolo di test non valido' });
+    req.session.rolePreview = { adminUserId: Number(req.realUser.id), role, startedAt: new Date().toISOString() };
+    await new Promise((resolve,reject)=>req.session.save(err=>err?reject(err):resolve()));
+    await pool.query("INSERT INTO audit_log(actor_user_id,action,method,endpoint,details,status_code) VALUES($1,$2,'POST','/api/admin/role-preview',$3::jsonb,200)", [req.realUser.id, 'Avvio simulazione ruolo', JSON.stringify({ simulatedRole: role })]);
+    res.json({ user: publicUser({ ...req.realUser, role }), rolePreview: { active: true, role, startedAt: req.session.rolePreview.startedAt } });
+  } catch(e) { next(e); }
+});
+app.post('/api/admin/role-preview/stop', requireAuth, async (req,res,next) => {
+  try {
+    if (req.realUser?.role !== 'admin' || req.session.rolePreview?.adminUserId !== Number(req.realUser.id)) return res.status(403).json({ error: 'Nessuna simulazione ruolo autorizzata da terminare' });
+    const simulatedRole = req.session.rolePreview.role;
+    delete req.session.rolePreview;
+    await new Promise((resolve,reject)=>req.session.save(err=>err?reject(err):resolve()));
+    await pool.query("INSERT INTO audit_log(actor_user_id,action,method,endpoint,details,status_code) VALUES($1,$2,'POST','/api/admin/role-preview/stop',$3::jsonb,200)", [req.realUser.id, 'Termine simulazione ruolo', JSON.stringify({ simulatedRole })]);
+    res.json({ user: publicUser(req.realUser), rolePreview: { active: false } });
+  } catch(e) { next(e); }
+});
 app.post('/api/auth/logout', (req, res) => {
   req.session.destroy(error => {
     if (error) return res.status(500).json({ error: 'Impossibile chiudere la sessione' });
