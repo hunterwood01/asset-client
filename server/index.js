@@ -191,6 +191,25 @@ async function initialize() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS cisco_product_lifecycle (
+      product_id TEXT PRIMARY KEY,
+      product_description TEXT,
+      bulletin_number TEXT,
+      bulletin_url TEXT,
+      announcement_date TEXT,
+      end_of_sale_date TEXT,
+      end_of_sw_maintenance_date TEXT,
+      end_of_security_support_date TEXT,
+      last_date_of_support TEXT,
+      end_of_service_contract_renewal TEXT,
+      source_url TEXT NOT NULL,
+      checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      response_status TEXT NOT NULL,
+      raw_response JSONB NOT NULL DEFAULT '{}'::jsonb
+    );
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version TEXT PRIMARY KEY,
       applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -504,6 +523,59 @@ app.put('/api/inventory-state',requireAuth,requireOperator,async(req,res,next)=>
 
 
 // Read-only operational health checks. Missing deployment metrics are reported as unavailable.
+let ciscoEoxToken = '';
+let ciscoEoxTokenExpiresAt = 0;
+async function getCiscoEoxToken() {
+  if (ciscoEoxToken && Date.now() < ciscoEoxTokenExpiresAt - 60000) return ciscoEoxToken;
+  const id = process.env.CISCO_EOX_CLIENT_ID, secret = process.env.CISCO_EOX_CLIENT_SECRET;
+  if (!id || !secret) throw Object.assign(new Error('Cisco Support API non configurata: mancano le credenziali EoX.'), { statusCode: 409 });
+  const body = new URLSearchParams({ grant_type: 'client_credentials', client_id: id, client_secret: secret });
+  const response = await fetch('https://id.cisco.com/oauth2/default/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }, body, signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error('Autenticazione Cisco Support API fallita (HTTP ' + response.status + ')');
+  const data = await response.json();
+  if (!data.access_token) throw new Error('Cisco Support API non ha restituito un access token');
+  ciscoEoxToken = data.access_token;
+  ciscoEoxTokenExpiresAt = Date.now() + Math.max(60, Number(data.expires_in) || 3600) * 1000;
+  return ciscoEoxToken;
+}
+app.get('/api/admin/lifecycle', requireAuth, requireAdmin, async (_req,res,next) => {
+  try {
+    const r = await pool.query('SELECT product_id AS "productId",product_description AS "productDescription",bulletin_number AS "bulletinNumber",bulletin_url AS "bulletinUrl",announcement_date AS "announcementDate",end_of_sale_date AS "endOfSaleDate",end_of_sw_maintenance_date AS "endOfSwMaintenanceDate",end_of_security_support_date AS "endOfSecuritySupportDate",last_date_of_support AS "lastDateOfSupport",end_of_service_contract_renewal AS "endOfServiceContractRenewal",source_url AS "sourceUrl",checked_at AS "checkedAt",response_status AS "responseStatus" FROM cisco_product_lifecycle ORDER BY product_id LIMIT 500');
+    res.json({ configured: Boolean(process.env.CISCO_EOX_CLIENT_ID && process.env.CISCO_EOX_CLIENT_SECRET), products: r.rows });
+  } catch(e) { next(e); }
+});
+app.post('/api/admin/lifecycle/lookup', requireAuth, requireAdmin, async (req,res,next) => {
+  try {
+    const productId = cleanString(req.body?.productId, 250);
+    if (!productId || /[,/?#]/.test(productId)) return res.status(400).json({ error: 'Inserisci un PID Cisco esatto, senza wildcard o liste multiple.' });
+    const token = await getCiscoEoxToken();
+    const sourceUrl = 'https://apix.cisco.com/supporttools/eox/rest/5/EOXByProductID/1/' + encodeURIComponent(productId) + '?responseencoding=json';
+    const response = await fetch(sourceUrl, { headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' }, signal: AbortSignal.timeout(20000) });
+    if (!response.ok) throw new Error('Cisco EoX API ha restituito HTTP ' + response.status);
+    const body = await response.json();
+    const raw = Array.isArray(body.EOXRecord) ? body.EOXRecord[0] : body.EOXRecord;
+    if (!raw) return res.status(404).json({ error: body.EOXError?.ErrorDescription || 'Nessun record EoX restituito per il PID esatto.' });
+    const dateValue = v => typeof v === 'string' ? v.trim() : (v && typeof v.value === 'string' ? v.value.trim() : '');
+    const values = {
+      productId: cleanString(raw.EOLProductID || productId, 250),
+      description: cleanString(raw.ProductIDDescription, 500),
+      bulletin: cleanString(raw.ProductBulletinNumber, 100),
+      bulletinUrl: cleanString(raw.LinkToProductBulletinURL, 1000),
+      announcement: dateValue(raw.EOXExternalAnnouncementDate),
+      endSale: dateValue(raw.EndOfSaleDate),
+      endSw: dateValue(raw.EndOfSWMaintenanceReleases),
+      endSecurity: dateValue(raw.EndOfSecurityVulSupportDate),
+      lastSupport: dateValue(raw.LastDateOfSupport),
+      contractRenewal: dateValue(raw.EndOfServiceContractRenewal)
+    };
+    await pool.query(`INSERT INTO cisco_product_lifecycle(product_id,product_description,bulletin_number,bulletin_url,announcement_date,end_of_sale_date,end_of_sw_maintenance_date,end_of_security_support_date,last_date_of_support,end_of_service_contract_renewal,source_url,checked_at,response_status,raw_response)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),'success',$12::jsonb)
+      ON CONFLICT(product_id) DO UPDATE SET product_description=EXCLUDED.product_description,bulletin_number=EXCLUDED.bulletin_number,bulletin_url=EXCLUDED.bulletin_url,announcement_date=EXCLUDED.announcement_date,end_of_sale_date=EXCLUDED.end_of_sale_date,end_of_sw_maintenance_date=EXCLUDED.end_of_sw_maintenance_date,end_of_security_support_date=EXCLUDED.end_of_security_support_date,last_date_of_support=EXCLUDED.last_date_of_support,end_of_service_contract_renewal=EXCLUDED.end_of_service_contract_renewal,source_url=EXCLUDED.source_url,checked_at=NOW(),response_status='success',raw_response=EXCLUDED.raw_response`,
+      [values.productId,values.description,values.bulletin,values.bulletinUrl,values.announcement,values.endSale,values.endSw,values.endSecurity,values.lastSupport,values.contractRenewal,sourceUrl,JSON.stringify(raw)]);
+    res.json({ product: { productId: values.productId, productDescription: values.description, bulletinNumber: values.bulletin, bulletinUrl: values.bulletinUrl, announcementDate: values.announcement, endOfSaleDate: values.endSale, endOfSwMaintenanceDate: values.endSw, endOfSecuritySupportDate: values.endSecurity, lastDateOfSupport: values.lastSupport, endOfServiceContractRenewal: values.contractRenewal, sourceUrl, checkedAt: new Date().toISOString(), responseStatus: 'success' } });
+  } catch(e) { if(e.statusCode) return res.status(e.statusCode).json({ error: e.message }); next(e); }
+});
+
 app.get('/api/admin/system-status', requireAuth, requireAdmin, async (_req, res) => {
   const checkedAt = new Date().toISOString();
   const checks = [];
