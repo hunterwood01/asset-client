@@ -21,9 +21,13 @@ async function loadVideoSeed(){
  try{
   const response=await fetch('./video-seed.json');if(!response.ok)throw new Error('HTTP '+response.status);
   const seed=await response.json();
-  const bytes=Uint8Array.from(atob(seed.data),c=>c.charCodeAt(0));
-  const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'));
-  const records=JSON.parse(await new Response(stream).text());
+  let records;
+  if(Array.isArray(seed))records=seed;
+  else if(seed.encoding==='deflate-base64'){
+   const bytes=Uint8Array.from(atob(seed.data),ch=>ch.charCodeAt(0));
+   const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'));
+   records=JSON.parse(await new Response(stream).text());
+  }else throw new Error('Formato video-seed.json non riconosciuto');
   const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('it').replace(/[^a-z0-9]+/g,' ').trim();
   const slug=s=>norm(s).replace(/\s+/g,'-').slice(0,40)||'sede';
   let added=0,branchesAdded=0;
