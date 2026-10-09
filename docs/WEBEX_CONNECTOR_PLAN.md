@@ -14,7 +14,7 @@ Add **Amministrazione → Connettori → Webex** with:
 - Connection status and tenant/organization identifier (never expose secrets).
 - “Verifica connessione” and “Sincronizza ora” actions.
 - Last successful sync, sync duration, records read, warnings, and API errors.
-- A comparison view: Webex-only, Asset Client-only, matched, and possible duplicates.
+- A comparison view: Webex-only, Asset Client-only, matched, possible duplicates, and assignment mismatches (Webex person/workspace versus Asset Client assignment).
 - A persistent alert when Webex reports a device serial that is not present in Asset Client; show serial, model, Webex device ID, source/type, first-seen time, last-seen time and a link to review.
 - Alert lifecycle: new, acknowledged, resolved; prevent duplicate active alerts for the same normalized serial/device identity, but retain alert history.
 - A lifecycle view for End-of-Life dates and other available milestones, with source and last-verified date.
@@ -27,7 +27,7 @@ Only administrators can configure or run a sync. Operators do not get access to 
 
 1. **Connector service (server-side only)** — handles OAuth credentials, token refresh, pagination, retries, rate limits, timeouts and API error handling. No Webex secret or access token is sent to the browser.
 2. **Webex API client** — use Cisco's documented Webex REST APIs for organization devices, workspace details and Webex Calling device/assignment information as applicable to the organization and granted scopes. Keep endpoint-specific adapters separate because device types and fields differ.
-3. **Read-only snapshot store** — save normalized external records and sync metadata separately from the operational inventory. Store external IDs, source, device type, model/product ID where exposed, serial number where exposed, MAC where exposed, display name, workspace/user assignment where exposed, reported status where available, and last-seen/sync timestamps. Avoid persisting unnecessary personal data.
+3. **Read-only snapshot store** — save normalized external records and sync metadata separately from the operational inventory. Store external IDs, source, device type, model/product ID where exposed, serial number where exposed, MAC where exposed, display name, workspace/user assignment where exposed (including stable person/workspace IDs plus display name/email or workspace name when permitted), reported status where available, and last-seen/sync timestamps. Avoid persisting unnecessary personal data.
 4. **Unknown-serial detector and alert store** — after a complete successful sync, compare normalized Webex serials against Asset Client manufacturer serials. Create a persistent alert when a serial is not found; deduplicate repeat observations, update last-seen, and reopen a resolved alert only under an explicit rule. Devices without a serial are not silently ignored: classify them as “serial unavailable / review required”, using Webex ID and MAC for tracking but do not claim they have an unknown serial.
 5. **Product lifecycle service** — retrieve Cisco End-of-Life (EoX) information using exact product identifiers (PID/SKU/model, and serial when supported) via the official Cisco Support APIs. Store announcement, End-of-Sale, End-of-Support/Last Date of Support, and other returned milestones separately, along with source and checked-at date. For RoomOS devices, also verify whether Control Hub lifecycle data is exposed through an official API for the target device types; do not scrape the UI or assume all models expose these milestones.
 6. **Matcher/diff engine** — match first by normalized manufacturer serial, then stable external ID/MAC where useful; present weaker name/model matches as suggestions only. Never auto-merge ambiguous matches.
@@ -57,7 +57,7 @@ Only administrators can configure or run a sync. Operators do not get access to 
 
 - Create an alert when a complete successful Webex sync returns a device with a non-empty manufacturer serial that does not match any Asset Client device serial.
 - Deduplicate by normalized serial and Webex device identity, so repeated syncs update the same active alert rather than creating a flood of duplicates.
-- Display serial, product/model, device type (Calling or RoomOS), Webex ID, MAC if available, first seen, last seen, and the latest sync result.
+- Display serial, product/model, device type (Calling or RoomOS), Webex ID, MAC if available, assigned person or workspace (with stable Webex ID and available display details), first seen, last seen, and the latest sync result.
 - Provide acknowledge and resolve actions for administrators. Keep the audit trail and alert history; resolution does not delete the record.
 - If the serial later matches a device added to Asset Client, mark the alert resolved with the reason “serial matched in Asset Client”; do not create or modify the asset automatically.
 - Devices with no serial exposed by Webex get a separate review finding, not a false unknown-serial alert.
@@ -87,7 +87,7 @@ Only label records “Asset Client only” after a complete successful sync for 
 ### Phase 0 — verify API contract
 - Confirm the Webex organization and expected authorization owner.
 - Map each required data field to an official Cisco endpoint and exact read scope.
-- Verify support for phone/Calling devices and RoomOS devices separately, including pagination, status fields and workspace/user assignments.
+- Verify support for phone/Calling devices and RoomOS devices separately, including pagination, status fields, serial-number availability by device type, and user/workspace assignment fields. Where supported, retrieve the associated person or workspace through the official device and Calling APIs; record assignment as unknown rather than guessing when the API does not expose it.
 - Document API limits and any fields that are not available.
 
 ### Phase 1 — secure connection and read-only sync
@@ -120,6 +120,7 @@ Only label records “Asset Client only” after a complete successful sync for 
 - No credentials/tokens are exposed to the browser or written to logs/audit.
 - A failed or partial sync never causes records to be reported as deleted, creates false unknown-serial alerts, or silently changes inventory.
 - A device serial observed in Webex but absent from Asset Client creates one persistent, deduplicated alert after a complete successful sync.
+- Where Webex exposes it, each snapshot includes the device's assigned person or workspace and stable Webex identifier; differences from Asset Client assignment are shown for administrator review.
 - Cisco lifecycle milestones are sourced from an official endpoint, preserve distinct date types, and display source plus last verification time.
 - Match decisions are explainable and uncertain matches require human review.
 - Branch truth continues to come from NETWORK.
