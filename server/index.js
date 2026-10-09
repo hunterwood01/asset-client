@@ -1,6 +1,8 @@
 'use strict';
 
 const express = require('express');
+const fs = require('node:fs/promises');
+const path = require('node:path');
 const helmet = require('helmet');
 const session = require('express-session');
 const PgSession = require('connect-pg-simple')(session);
@@ -62,6 +64,7 @@ const loginLimiter = rateLimit({
 });
 
 async function initialize() {
+  await pool.query(`CREATE TABLE IF NOT EXISTS shared_inventory_state (id SMALLINT PRIMARY KEY CHECK(id=1), state JSONB NOT NULL, revision BIGINT NOT NULL DEFAULT 1, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_by BIGINT REFERENCES app_users(id) ON DELETE SET NULL)`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS app_users (
       id BIGSERIAL PRIMARY KEY,
@@ -75,6 +78,21 @@ async function initialize() {
     );
     CREATE INDEX IF NOT EXISTS app_users_active_idx ON app_users(active);
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version TEXT PRIMARY KEY,
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  const migrationVersion = '001_shared_inventory';
+  const applied = await pool.query('SELECT 1 FROM schema_migrations WHERE version=$1', [migrationVersion]);
+  if (!applied.rowCount) {
+    const migrationPath = path.join(__dirname, 'migrations', migrationVersion + '.sql');
+    const migrationSql = await fs.readFile(migrationPath, 'utf8');
+    await pool.query(migrationSql);
+    await pool.query('INSERT INTO schema_migrations(version) VALUES($1) ON CONFLICT DO NOTHING', [migrationVersion]);
+  }
 
   const username = String(process.env.BOOTSTRAP_ADMIN_USERNAME || '').trim();
   const password = String(process.env.BOOTSTRAP_ADMIN_PASSWORD || '');
@@ -217,6 +235,120 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, async (req, res, ne
     res.json({ user: result.rows[0] });
   } catch (error) { next(error); }
 });
+
+
+function requireOperator(req, res, next) {
+  if (!['admin', 'operator'].includes(req.user?.role)) return res.status(403).json({ error: 'Permesso insufficiente' });
+  next();
+}
+const asInt = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
+const cleanString = (value, max = 500) => typeof value === 'string' ? value.trim().slice(0, max) : '';
+
+app.get('/api/branches', requireAuth, requireOperator, async (_req, res, next) => {
+  try {
+    const r = await pool.query(`SELECT id, company_name AS "ragioneSociale", name, code, phone_prefix AS "phonePrefix", network_lan AS "networkLan", network_services AS "networkServices", network_guest AS "networkGuest", wlc, voice, old_name AS "oldName", new_name AS "newName", monthly_revenue AS "monthlyRevenue" FROM branches WHERE active=TRUE ORDER BY name`);
+    res.json({ branches: r.rows });
+  } catch (e) { next(e); }
+});
+app.post('/api/branches', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const b=req.body||{}, name=cleanString(b.name,200), company=cleanString(b.ragioneSociale,200);
+    if(!name) return res.status(400).json({error:'Nome filiale obbligatorio'});
+    const r=await pool.query(`INSERT INTO branches(company_name,name,code,phone_prefix,network_lan,network_services,network_guest,wlc,voice,old_name,new_name,monthly_revenue)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      ON CONFLICT(company_name,name) DO UPDATE SET code=EXCLUDED.code,phone_prefix=EXCLUDED.phone_prefix,network_lan=EXCLUDED.network_lan,network_services=EXCLUDED.network_services,network_guest=EXCLUDED.network_guest,wlc=EXCLUDED.wlc,voice=EXCLUDED.voice,old_name=EXCLUDED.old_name,new_name=EXCLUDED.new_name,monthly_revenue=EXCLUDED.monthly_revenue,active=TRUE,updated_at=NOW()
+      RETURNING id,company_name AS "ragioneSociale",name,code,monthly_revenue AS "monthlyRevenue"`,
+      [company,name,cleanString(b.code,100)||null,cleanString(b.phonePrefix,100),cleanString(b.networkLan,200),cleanString(b.networkServices,200),cleanString(b.networkGuest,200),cleanString(b.wlc,200),cleanString(b.voice,200),cleanString(b.oldName,200),cleanString(b.newName,200),Math.max(0,Number(b.monthlyRevenue)||0)]);
+    res.status(201).json({branch:r.rows[0]});
+  } catch(e){next(e);}
+});
+app.get('/api/devices', requireAuth, requireOperator, async (_req,res,next)=>{
+ try{
+  const r=await pool.query(`SELECT d.id,d.serial,d.asset_tag AS "assetTag",d.type,d.brand,d.model,d.status,d.branch_id AS "branchId",d.warehouse_id AS "warehouseId",d.owner_type AS "ownerType",d.assigned_to AS "assignedTo",d.purchase_cost AS "purchaseCost",d.purchase_date AS "purchaseDate",d.activation_date AS "activationDate",d.monthly_fee AS "monthlyFee",d.useful_life_months AS "usefulLifeMonths",d.notes,d.lot_id AS "lotId",b.name AS "branchName",w.name AS "warehouseName" FROM devices d LEFT JOIN branches b ON b.id=d.branch_id LEFT JOIN warehouses w ON w.id=d.warehouse_id ORDER BY d.id DESC`);
+  res.json({devices:r.rows});
+ }catch(e){next(e);}
+});
+app.post('/api/devices', requireAuth, requireOperator, async(req,res,next)=>{
+ try{
+  const d=req.body||{},serial=cleanString(d.serial,200),type=cleanString(d.type,100);
+  if(!serial||!type)return res.status(400).json({error:'Matricola e tipologia obbligatorie'});
+  const branchId=d.branchId?asInt(d.branchId):null,warehouseId=d.warehouseId?asInt(d.warehouseId):null;
+  if(d.branchId&&!branchId||d.warehouseId&&!warehouseId)return res.status(400).json({error:'Filiale o magazzino non valido'});
+  if(branchId&&warehouseId)return res.status(400).json({error:'Un dispositivo non può essere in filiale e magazzino contemporaneamente'});
+  const owner=['company','customer','unknown'].includes(d.ownerType)?d.ownerType:'unknown';
+  const r=await pool.query(`INSERT INTO devices(serial,asset_tag,type,brand,model,status,branch_id,warehouse_id,owner_type,assigned_to,purchase_cost,purchase_date,activation_date,monthly_fee,useful_life_months,notes,lot_id)
+   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+   ON CONFLICT(serial) DO UPDATE SET asset_tag=EXCLUDED.asset_tag,type=EXCLUDED.type,brand=EXCLUDED.brand,model=EXCLUDED.model,status=EXCLUDED.status,branch_id=EXCLUDED.branch_id,warehouse_id=EXCLUDED.warehouse_id,owner_type=EXCLUDED.owner_type,assigned_to=EXCLUDED.assigned_to,purchase_cost=EXCLUDED.purchase_cost,purchase_date=EXCLUDED.purchase_date,activation_date=EXCLUDED.activation_date,monthly_fee=EXCLUDED.monthly_fee,useful_life_months=EXCLUDED.useful_life_months,notes=EXCLUDED.notes,lot_id=EXCLUDED.lot_id,updated_at=NOW()
+   RETURNING id,serial,type,status,branch_id AS "branchId",warehouse_id AS "warehouseId",owner_type AS "ownerType"`,
+   [serial,cleanString(d.assetTag,200)||null,type,cleanString(d.brand,200),cleanString(d.model,200),cleanString(d.status,100)||'Disponibile',branchId,warehouseId,owner,cleanString(d.assignedTo,200),Math.max(0,Number(d.purchaseCost)||0),d.purchaseDate||null,d.activationDate||null,Math.max(0,Number(d.monthlyFee)||0),Math.max(1,Math.floor(Number(d.usefulLifeMonths)||36)),cleanString(d.notes,4000),cleanString(d.lotId,200)||null]);
+  res.status(201).json({device:r.rows[0]});
+ }catch(e){if(e.code==='23505')return res.status(409).json({error:'Matricola o asset tag già presente'});next(e);}
+});
+app.get('/api/warehouses',requireAuth,requireOperator,async(_req,res,next)=>{
+ try{const r=await pool.query('SELECT id,code,name,location_description AS "locationDescription",default_owner AS "defaultOwner" FROM warehouses WHERE active=TRUE ORDER BY name');res.json({warehouses:r.rows});}catch(e){next(e);}
+});
+app.get('/api/license-purchases',requireAuth,requireOperator,async(_req,res,next)=>{
+ try{const r=await pool.query(`SELECT id,category,supplier,package_name AS "packageName",quantity,unit_cost AS "unitCost",(unit_cost*quantity) AS "totalCost",currency,purchase_date AS "purchaseDate",start_date AS "startDate",expiry_date AS "expiryDate",reference,notes FROM license_purchases ORDER BY purchase_date DESC,id DESC`);res.json({purchases:r.rows});}catch(e){next(e);}
+});
+app.post('/api/license-purchases',requireAuth,requireOperator,async(req,res,next)=>{
+ try{const p=req.body||{},quantity=Math.floor(Number(p.quantity)),unitCost=p.unitCost!==undefined?Number(p.unitCost):(Number(p.totalCost)||0)/Math.max(1,quantity);
+ if(!['webex','router'].includes(p.category)||!cleanString(p.packageName,200)||!Number.isInteger(quantity)||quantity<1||!p.purchaseDate||!p.startDate||!p.expiryDate||p.expiryDate<p.startDate||!Number.isFinite(unitCost)||unitCost<0)return res.status(400).json({error:'Dati acquisto licenze non validi'});
+ const r=await pool.query(`INSERT INTO license_purchases(category,supplier,package_name,quantity,unit_cost,currency,purchase_date,start_date,expiry_date,reference,notes,created_by)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id,category,package_name AS "packageName",quantity,unit_cost AS "unitCost",(unit_cost*quantity) AS "totalCost",purchase_date AS "purchaseDate",start_date AS "startDate",expiry_date AS "expiryDate"`,
+ [p.category,cleanString(p.supplier,200),cleanString(p.packageName,200),quantity,unitCost,cleanString(p.currency,3)||'EUR',p.purchaseDate,p.startDate,p.expiryDate,cleanString(p.reference,200),cleanString(p.notes,2000),req.user.id]);
+ res.status(201).json({purchase:r.rows[0]});
+ }catch(e){next(e);}
+});
+app.get('/api/license-allocations',requireAuth,requireOperator,async(_req,res,next)=>{
+ try{const r=await pool.query(`SELECT id,purchase_id AS "purchaseId",branch_id AS "branchId",quantity,assigned_at AS "assignedAt",released_at AS "releasedAt",notes FROM license_allocations ORDER BY id`);res.json({allocations:r.rows});}catch(e){next(e);}
+});
+app.post('/api/license-allocations',requireAuth,requireOperator,async(req,res,next)=>{
+ const c=await pool.connect();
+ try{const a=req.body||{},purchaseId=asInt(a.purchaseId),branchId=asInt(a.branchId),quantity=Math.floor(Number(a.quantity));
+ if(!purchaseId||!branchId||!Number.isInteger(quantity)||quantity<1)return res.status(400).json({error:'Pacchetto, filiale e quantità sono obbligatori'});
+ await c.query('BEGIN');
+ const p=await c.query('SELECT quantity FROM license_purchases WHERE id=$1 FOR UPDATE',[purchaseId]);
+ if(!p.rowCount){await c.query('ROLLBACK');return res.status(404).json({error:'Pacchetto licenze non trovato'});}
+ const total=await c.query('SELECT COALESCE(SUM(quantity),0)::int AS n FROM license_allocations WHERE purchase_id=$1 AND released_at IS NULL',[purchaseId]);
+ if(total.rows[0].n+quantity>p.rows[0].quantity){await c.query('ROLLBACK');return res.status(409).json({error:'Quantità da allocare superiore al residuo disponibile'});}
+ const r=await c.query('INSERT INTO license_allocations(purchase_id,branch_id,quantity,assigned_at,notes) VALUES($1,$2,$3,$4,$5) RETURNING id,purchase_id AS "purchaseId",branch_id AS "branchId",quantity,assigned_at AS "assignedAt"',[purchaseId,branchId,quantity,a.assignedAt||new Date().toISOString().slice(0,10),cleanString(a.notes,1000)]);
+ await c.query('COMMIT');res.status(201).json({allocation:r.rows[0]});
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});next(e);}finally{c.release();}
+});
+app.get('/api/stock-movements',requireAuth,requireOperator,async(_req,res,next)=>{
+ try{const r=await pool.query(`SELECT id,device_id AS "deviceId",movement_type AS "movementType",from_warehouse_id AS "fromWarehouseId",to_warehouse_id AS "toWarehouseId",from_branch_id AS "fromBranchId",to_branch_id AS "toBranchId",owner_before AS "ownerBefore",owner_after AS "ownerAfter",occurred_at AS "occurredAt",reference,notes FROM stock_movements ORDER BY occurred_at DESC,id DESC LIMIT 1000`);res.json({movements:r.rows});}catch(e){next(e);}
+});
+app.post('/api/stock-movements',requireAuth,requireOperator,async(req,res,next)=>{
+ const c=await pool.connect();
+ try{const m=req.body||{},deviceId=asInt(m.deviceId);
+ const types=['purchase','transfer','branch_assignment','return_to_stock','repair_out','repair_in','retirement','ownership_change'];
+ if(!deviceId||!types.includes(m.movementType))return res.status(400).json({error:'Dispositivo o tipo movimento non valido'});
+ await c.query('BEGIN');
+ const current=await c.query('SELECT id,branch_id,warehouse_id,owner_type FROM devices WHERE id=$1 FOR UPDATE',[deviceId]);
+ if(!current.rowCount){await c.query('ROLLBACK');return res.status(404).json({error:'Dispositivo non trovato'});}
+ const d=current.rows[0],toBranch=m.toBranchId?asInt(m.toBranchId):null,toWarehouse=m.toWarehouseId?asInt(m.toWarehouseId):null;
+ if(toBranch&&toWarehouse){await c.query('ROLLBACK');return res.status(400).json({error:'Destinazione ambigua'});}
+ const ownerAfter=['company','customer','unknown'].includes(m.ownerAfter)?m.ownerAfter:d.owner_type;
+ await c.query(`INSERT INTO stock_movements(device_id,movement_type,from_warehouse_id,to_warehouse_id,from_branch_id,to_branch_id,owner_before,owner_after,performed_by,reference,notes)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+ [deviceId,m.movementType,d.warehouse_id,toWarehouse,d.branch_id,toBranch,d.owner_type,ownerAfter,req.user.id,cleanString(m.reference,200),cleanString(m.notes,2000)]);
+ await c.query('UPDATE devices SET branch_id=$1,warehouse_id=$2,owner_type=$3,updated_at=NOW() WHERE id=$4',[toBranch,toWarehouse,ownerAfter,deviceId]);
+ await c.query('COMMIT');res.status(201).json({status:'ok'});
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});next(e);}finally{c.release();}
+});
+
+
+app.get('/api/inventory-state',requireAuth,requireOperator,async(_req,res,next)=>{try{const r=await pool.query('SELECT state,revision,updated_at AS "updatedAt" FROM shared_inventory_state WHERE id=1');res.json(r.rowCount?r.rows[0]:{state:null,revision:0,updatedAt:null});}catch(e){next(e);}});
+app.put('/api/inventory-state',requireAuth,requireOperator,async(req,res,next)=>{try{
+ const state=req.body?.state,revision=Number(req.body?.revision);
+ if(!state||typeof state!=='object'||Array.isArray(state))return res.status(400).json({error:'Snapshot inventario non valido'});
+ if(!Number.isSafeInteger(revision)||revision<0)return res.status(400).json({error:'Revisione non valida'});
+ const encoded=JSON.stringify(state);if(Buffer.byteLength(encoded,'utf8')>8*1024*1024)return res.status(413).json({error:'Snapshot troppo grande (limite 8 MB)'});
+ const c=await pool.connect();try{await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(748213)');const cur=await c.query('SELECT revision FROM shared_inventory_state WHERE id=1 FOR UPDATE');const actual=cur.rowCount?Number(cur.rows[0].revision):0;
+ if(actual!==revision){await c.query('ROLLBACK');return res.status(409).json({error:'I dati sono cambiati in un’altra sessione. Ricarica la pagina prima di continuare.',revision:actual});}
+ const next=actual+1;await c.query('INSERT INTO shared_inventory_state(id,state,revision,updated_at,updated_by) VALUES(1,$1::jsonb,$2,NOW(),$3) ON CONFLICT(id) DO UPDATE SET state=EXCLUDED.state,revision=EXCLUDED.revision,updated_at=NOW(),updated_by=EXCLUDED.updated_by',[encoded,next,req.user.id]);await c.query('COMMIT');res.json({revision:next,updatedAt:new Date().toISOString()});
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}catch(e){next(e);}});
 
 app.use((error, _req, res, _next) => {
   console.error('API error:', error.message);
