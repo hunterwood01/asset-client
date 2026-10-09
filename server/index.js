@@ -615,6 +615,8 @@ app.get('/api/admin/system-status', requireAuth, requireAdmin, async (_req, res)
     checks.push({ id: 'jobs', label: 'Sincronizzazioni e processi', status: 'unknown', message: 'Storico processi non disponibile', checkedAt, details: {} });
   }
   checks.push(webex);
+  const eoxConfigured = Boolean(process.env.CISCO_EOX_CLIENT_ID && process.env.CISCO_EOX_CLIENT_SECRET);
+  checks.push({ id: 'cisco-eox', label: 'Cisco EoX', status: eoxConfigured ? 'unknown' : 'unknown', message: eoxConfigured ? 'Credenziali configurate; ultima verifica da eseguire con una ricerca PID' : 'Non configurato: mancano le credenziali Cisco Support API', checkedAt, details: { configured: eoxConfigured } });
   const order = { error: 0, warning: 1, unknown: 2, ok: 3 };
   res.json({ checkedAt, overall: checks.some(x => x.status === 'error') ? 'error' : checks.some(x => x.status === 'warning') ? 'warning' : checks.some(x => x.status === 'unknown') ? 'unknown' : 'ok', checks: checks.sort((a,b) => (order[a.status] ?? 2) - (order[b.status] ?? 2)) });
 });
@@ -662,6 +664,7 @@ app.post('/api/admin/webex/sync', requireAuth, requireAdmin, async (req,res,next
     let pages = 0;
     while (nextUrl) {
       if (++pages > 1000) throw new Error('Limite di paginazione superato');
+      if (new URL(nextUrl).hostname !== 'webexapis.com') throw new Error('URL di paginazione Webex non autorizzato');
       const response = await fetch(nextUrl, { headers: { Authorization: 'Bearer ' + process.env.WEBEX_ACCESS_TOKEN, Accept: 'application/json' }, signal: AbortSignal.timeout(20000) });
       if (!response.ok) {
         const status = response.status;
@@ -682,6 +685,7 @@ app.post('/api/admin/webex/sync', requireAuth, requireAdmin, async (req,res,next
       try {
         while (target) {
           if (++count > 100) throw new Error('Directory pagination limit');
+          if (new URL(target).hostname !== 'webexapis.com') return [];
           const response = await fetch(target, { headers: { Authorization: 'Bearer ' + process.env.WEBEX_ACCESS_TOKEN, Accept: 'application/json' }, signal: AbortSignal.timeout(12000) });
           if (!response.ok) return [];
           const body = await response.json();
