@@ -4,8 +4,8 @@ const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=
 const uid=()=>crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random().toString(16).slice(2);
 const money=n=>new Intl.NumberFormat('it-IT',{style:'currency',currency:'EUR'}).format(Number(n)||0);
 const dateNow=()=>new Date().toISOString().slice(0,10);
-const typeDefaults={'Telefono cordless':21.5,'Telefono IP':0,'Router':40,'Room Bar':null,'Room Bar Pro':null,'Switch':0,'Access point':0,'PC':0,'Smartphone':0,'Altro':0};
-const typeIcons={'Telefono IP':['☎','#e7efff','#244f9e'],'Telefono cordless':['📞','#e4f7ed','#176642'],'Smartphone':['▯','#f0e8ff','#6941a5'],'Router':['↗','#fff0dc','#92500a'],'Switch':['⇄','#e2f6f8','#176873'],'Access point':['◉','#e8f5e9','#2d6b35'],'PC':['▣','#e9edf0','#46525d'],'Room Bar':['▰','#fce7f3','#9d2768'],'Room Bar Pro':['▰+','#f3e8ff','#6b35a6'],'Altro':['◆','#eee','#555']};
+const typeDefaults={'Telefono cordless':21.5,'Telefono IP':0,'Router':40,'Room Bar':null,'Room Bar Pro':null,'Desk Mini':null,'Room Kit':null,'Room Kit Mini':null,'Room Kit Plus':null,'Switch':0,'Access point':0,'PC':0,'Smartphone':0,'Altro':0};
+const typeIcons={'Telefono IP':['☎','#e7efff','#244f9e'],'Telefono cordless':['📞','#e4f7ed','#176642'],'Smartphone':['▯','#f0e8ff','#6941a5'],'Router':['↗','#fff0dc','#92500a'],'Switch':['⇄','#e2f6f8','#176873'],'Access point':['◉','#e8f5e9','#2d6b35'],'PC':['▣','#e9edf0','#46525d'],'Room Bar':['▰','#fce7f3','#9d2768'],'Room Bar Pro':['▰+','#f3e8ff','#6b35a6'],'Desk Mini':['▱','#e7f4ff','#205b85'],'Room Kit':['▰','#e5f3ff','#205b85'],'Room Kit Mini':['▰','#e5f3ff','#205b85'],'Room Kit Plus':['▰+','#e5f3ff','#205b85'],'Altro':['◆','#eee','#555']};
 let db;
 try{db=JSON.parse(localStorage.getItem(KEY))}catch{}
 if(!db){let old={};try{old=JSON.parse(localStorage.getItem(OLD))||{}}catch{};db={branches:(old.branches||[]).map(b=>({...b,phonePrefix:b.phonePrefix||'',networkLan:b.networkLan||'',networkServices:b.networkServices||'',networkGuest:b.networkGuest||'',wlc:b.wlc||'',voice:b.voice||'',oldName:b.oldName||''})),devices:(old.devices||[]).map(d=>({...d,purchaseCost:Number(d.purchaseCost)||0,purchaseDate:d.purchaseDate||'',activationDate:d.activationDate||'',monthlyFee:typeDefaults[d.type]??0,usefulLifeMonths:Number(d.usefulLifeMonths)||36,replacedFrom:d.replacedFrom||'',lotId:''})),purchases:[],settings:{roomBarFee:'',roomBarProFee:''}};localStorage.setItem(KEY,JSON.stringify(db))}
@@ -16,6 +16,30 @@ const branchName=id=>db.branches.find(b=>b.id===id)?.name||'Magazzino / non asse
 const splitBranchName=value=>{let s=String(value||'').trim(),i=s.indexOf(' - ');return i>0?{ragioneSociale:s.slice(0,i).trim(),name:s.slice(i+3).trim()}:{ragioneSociale:'',name:s}};
 const deviceBadge=t=>{let v=typeIcons[t]||typeIcons.Altro;return '<span class="device-kind" style="--kind-bg:'+v[1]+';--kind-color:'+v[2]+'"><span>'+v[0]+'</span>'+esc(t||'Altro')+'</span>'};
 const statusBadge=s=>'<span class="badge '+(['Guasto','Dismesso'].includes(s)?'bad':['In riparazione','In consegna'].includes(s)?'warn':'ok')+'">'+esc(s||'—')+'</span>';
+async function loadVideoSeed(){
+ if(db.settings.videoSeedVersion==='2026-10-09')return;
+ try{
+  const response=await fetch('./video-seed.json');if(!response.ok)throw new Error('HTTP '+response.status);
+  const seed=await response.json();
+  const bytes=Uint8Array.from(atob(seed.data),c=>c.charCodeAt(0));
+  const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'));
+  const records=JSON.parse(await new Response(stream).text());
+  const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('it').replace(/[^a-z0-9]+/g,' ').trim();
+  const slug=s=>norm(s).replace(/\s+/g,'-').slice(0,40)||'sede';
+  let added=0,branchesAdded=0;
+  records.forEach((row,index)=>{
+   const [company,site,type,, ,status,contract]=row;
+   if(!type||String(type).trim().toUpperCase()==='N/A')return;
+   let branch=db.branches.find(b=>norm(b.name)===norm(site));
+   if(!branch){branch={id:uid(),ragioneSociale:String(company||'').trim(),name:String(site||'').trim(),phonePrefix:'',networkLan:'',networkServices:'',networkGuest:'',wlc:'',voice:'',oldName:'',newName:''};db.branches.push(branch);branchesAdded++}
+   else if(!branch.ragioneSociale&&company)branch.ragioneSociale=String(company).trim();
+   const serial='VIDEO-'+slug(company)+'-'+slug(site)+'-'+String(index+1).padStart(3,'0');
+   if(db.devices.some(d=>d.videoSeedId===index+1||d.serial===serial))return;
+   db.devices.push({id:uid(),videoSeedId:index+1,serial,type:String(type).trim(),brand:'Cisco',model:String(type).trim(),status:norm(status)==='ok'?'Operativo':'Disponibile',branchId:branch.id,assignedTo:'',purchaseCost:0,purchaseDate:'',activationDate:'',monthlyFee:0,usefulLifeMonths:36,replacedFrom:'',notes:contract?('Contratto: '+String(contract).trim()):'Contratto non specificato',lotId:''});added++;
+  });
+  db.settings.videoSeedVersion='2026-10-09';save();console.info('Sale riunioni importate:',added,'apparati,',branchesAdded,'filiali aggiunte');render();
+ }catch(err){console.error('Caricamento apparati sale riunioni non riuscito:',err)}
+}
 function styles(){if($('#assetStyles'))return;let s=document.createElement('style');s.id='assetStyles';s.textContent='.dashboard-link{cursor:pointer;transition:transform .15s ease,border-color .15s ease}.dashboard-link:hover{transform:translateY(-2px);border-color:var(--primary)}.dashboard-link:focus-visible{outline:3px solid var(--primary);outline-offset:3px}.device-kind{display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border-radius:9px;background:var(--kind-bg);color:var(--kind-color);font-size:.78rem;font-weight:750;white-space:nowrap}.device-cell{display:grid;gap:6px;min-width:145px}.finance-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.finance-grid .card{min-width:0}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.form-grid label{display:grid;gap:5px;font-size:.9rem}.form-grid input,.form-grid select,.form-grid textarea{width:100%;min-width:0;padding:10px;border:1px solid var(--border);border-radius:9px;background:var(--bg);color:var(--text)}.muted{color:var(--muted)}.pill{display:inline-block;padding:4px 8px;border-radius:7px;background:var(--surface-2);font-size:.8rem}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.finance-note{padding:12px 14px;background:var(--surface-2);border-radius:12px;color:var(--muted)}.mini-actions{display:flex;gap:8px;flex-wrap:wrap}@media(max-width:900px){.finance-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:600px){.finance-grid,.form-grid{grid-template-columns:1fr}}';document.head.append(s)}
 function nav(){let n=$('.nav');n.innerHTML=[['dashboard','Dashboard','01'],['branches','Filiali','02'],['devices','Dispositivi','03'],['finance','Finance','04']].map(x=>'<a href="#" data-page="'+x[0]+'" class="'+(page===x[0]?'active':'')+'"><span>'+x[1]+'</span><small>'+x[2]+'</small></a>').join('');n.querySelectorAll('a').forEach(a=>a.onclick=e=>{e.preventDefault();page=a.dataset.page;query='';deviceFilter='';render()})}
 function deviceRows(rows,actions=true,showCost=true){return '<div style="overflow:auto"><table><thead><tr><th>Matricola</th><th>Apparato</th><th>Filiale</th><th>Stato</th>'+(showCost?'<th>Acquisto</th>':'')+'<th>Attivazione</th>'+(actions?'<th>Azioni</th>':'')+'</tr></thead><tbody>'+(rows.length?rows.map(d=>'<tr><td>'+esc(d.serial)+'</td><td><div class="device-cell"><b>'+esc([d.brand,d.model].filter(Boolean).join(' ')||d.type)+'</b>'+deviceBadge(d.type)+'</div></td><td>'+esc(branchName(d.branchId))+'</td><td>'+statusBadge(d.status)+'</td>'+(showCost?'<td>'+money(d.purchaseCost)+'</td>':'')+'<td>'+esc(d.activationDate||'Non attivato')+'</td>'+(actions?'<td><button data-edit="'+d.id+'">Modifica</button> <button data-del="'+d.id+'">Elimina</button></td>':'')+'</tr>').join(''):'<tr><td colspan="'+(5+(showCost?1:0)+(actions?1:0))+'">Nessun dispositivo presente.</td></tr>')+'</tbody></table></div>'}
@@ -47,5 +71,5 @@ fetch('./network-seed.json').then(r=>{if(!r.ok)throw new Error('HTTP '+r.status)
   save();
   console.info('NETWORK seed caricato:',added,'nuove filiali,',updated,'aggiornate');
   render();
-}).catch(err=>console.error('Caricamento anagrafica NETWORK non riuscito:',err));
+}).catch(err=>console.error('Caricamento anagrafica NETWORK non riuscito:',err)).finally(()=>loadVideoSeed());
 })();
