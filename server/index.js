@@ -142,9 +142,12 @@ async function initialize() {
       connection_status TEXT,
       person_id TEXT,
       person_email TEXT,
+      person_name TEXT,
       workspace_id TEXT,
       workspace_name TEXT,
       location_id TEXT,
+      location_name TEXT,
+      suggested_branch_name TEXT,
       display_name TEXT,
       raw_safe JSONB NOT NULL DEFAULT '{}'::jsonb,
       first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -162,8 +165,11 @@ async function initialize() {
       mac TEXT,
       display_name TEXT,
       person_email TEXT,
+      person_name TEXT,
       workspace_id TEXT,
       workspace_name TEXT,
+      location_name TEXT,
+      suggested_branch_name TEXT,
       status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','acknowledged','resolved')),
       resolution_reason TEXT,
       first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -173,6 +179,15 @@ async function initialize() {
       UNIQUE(alert_type, webex_device_id, normalized_serial)
     );
     CREATE INDEX IF NOT EXISTS webex_device_alerts_status_idx ON webex_device_alerts(status, last_seen_at DESC);
+  `);
+
+  await pool.query(`
+    ALTER TABLE webex_device_snapshots ADD COLUMN IF NOT EXISTS person_name TEXT;
+    ALTER TABLE webex_device_snapshots ADD COLUMN IF NOT EXISTS location_name TEXT;
+    ALTER TABLE webex_device_snapshots ADD COLUMN IF NOT EXISTS suggested_branch_name TEXT;
+    ALTER TABLE webex_device_alerts ADD COLUMN IF NOT EXISTS person_name TEXT;
+    ALTER TABLE webex_device_alerts ADD COLUMN IF NOT EXISTS location_name TEXT;
+    ALTER TABLE webex_device_alerts ADD COLUMN IF NOT EXISTS suggested_branch_name TEXT;
   `);
 
   await pool.query(`
@@ -546,9 +561,12 @@ function webexSafeDevice(d) {
     connectionStatus: cleanString(d.connectionStatus, 100),
     personId: cleanString(d.personId, 200),
     personEmail: cleanString(d.personEmail, 320),
+    personName: cleanString(d.personName, 200),
     workspaceId: cleanString(d.workspaceId, 200),
     workspaceName: cleanString(d.workspaceName, 200),
     locationId: cleanString(d.locationId, 200),
+    locationName: cleanString(d.locationName, 200),
+    suggestedBranchName: cleanString(d.suggestedBranchName, 200),
     displayName: cleanString(d.displayName || d.name, 200)
   };
 }
@@ -585,6 +603,53 @@ app.post('/api/admin/webex/sync', requireAuth, requireAdmin, async (req,res,next
       nextUrl = match ? match[1] : '';
       if (devices.length > 100000) throw new Error('Limite di dispositivi superato');
     }
+    // Directory enrichment is best-effort: a missing optional read scope must not invalidate the complete device inventory.
+    async function readDirectory(url) {
+      const items = [];
+      let target = url, count = 0;
+      try {
+        while (target) {
+          if (++count > 100) throw new Error('Directory pagination limit');
+          const response = await fetch(target, { headers: { Authorization: 'Bearer ' + process.env.WEBEX_ACCESS_TOKEN, Accept: 'application/json' }, signal: AbortSignal.timeout(12000) });
+          if (!response.ok) return [];
+          const body = await response.json();
+          if (!Array.isArray(body.items)) return [];
+          items.push(...body.items);
+          const link = response.headers.get('link') || '';
+          const match = link.match(/<([^>]+)>;\\s*rel="?next"?/i);
+          target = match ? match[1] : '';
+        }
+      } catch { return []; }
+      return items;
+    }
+    const [workspaces, people, locations] = await Promise.all([
+      readDirectory('https://webexapis.com/v1/workspaces?max=100'),
+      readDirectory('https://webexapis.com/v1/people?max=100'),
+      readDirectory('https://webexapis.com/v1/locations?max=100')
+    ]);
+    const workspaceById = new Map(workspaces.map(x => [String(x.id), x]));
+    const personById = new Map(people.map(x => [String(x.id), x]));
+    const locationById = new Map(locations.map(x => [String(x.id), x]));
+    const normLabel = value => String(value || '').trim().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLocaleLowerCase('it').replace(/[^a-z0-9]/g,'');
+    const inventoryBeforeBranchMatch = await pool.query('SELECT state FROM shared_inventory_state WHERE id=1');
+    const knownBranches = inventoryBeforeBranchMatch.rows[0]?.state?.branches || [];
+    for (const d of devices) {
+      const ws = workspaceById.get(String(d.workspaceId || ''));
+      const person = personById.get(String(d.personId || ''));
+      if (ws) {
+        d.workspaceName = d.workspaceName || cleanString(ws.name, 200);
+        d.locationId = d.locationId || cleanString(ws.locationId, 200);
+      }
+      if (person) {
+        d.personName = d.personName || cleanString(person.displayName || person.name, 200);
+        d.personEmail = d.personEmail || cleanString(Array.isArray(person.emails) ? person.emails[0] : person.email, 320);
+      }
+      const loc = locationById.get(String(d.locationId || ''));
+      if (loc) d.locationName = cleanString(loc.name, 200);
+      const candidates = [d.locationName, d.workspaceName, d.displayName].map(normLabel).filter(Boolean);
+      const matches = knownBranches.filter(b => [b.name,b.city,b.code,b.newName].map(normLabel).some(v => v && candidates.includes(v)));
+      d.suggestedBranchName = matches.length === 1 ? String(matches[0].name || matches[0].city || matches[0].code || '') : '';
+    }
     const inventory = await pool.query('SELECT state FROM shared_inventory_state WHERE id=1');
     const assetDevices = inventory.rows[0]?.state?.devices || [];
     const knownSerials = new Set(assetDevices.map(d => normalizeSerial(d.serial)).filter(Boolean));
@@ -594,16 +659,16 @@ app.post('/api/admin/webex/sync', requireAuth, requireAdmin, async (req,res,next
       for (const d of devices) {
         const serial = d.serialNumber;
         const normalized = normalizeSerial(serial);
-        await client.query(`INSERT INTO webex_device_snapshots(webex_device_id,serial_number,normalized_serial,product,model,mac,device_type,connection_status,person_id,person_email,workspace_id,workspace_name,location_id,display_name,raw_safe,last_seen_at,last_sync_run_id)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,NOW(),$16)
-          ON CONFLICT(webex_device_id) DO UPDATE SET serial_number=EXCLUDED.serial_number,normalized_serial=EXCLUDED.normalized_serial,product=EXCLUDED.product,model=EXCLUDED.model,mac=EXCLUDED.mac,device_type=EXCLUDED.device_type,connection_status=EXCLUDED.connection_status,person_id=EXCLUDED.person_id,person_email=EXCLUDED.person_email,workspace_id=EXCLUDED.workspace_id,workspace_name=EXCLUDED.workspace_name,location_id=EXCLUDED.location_id,display_name=EXCLUDED.display_name,raw_safe=EXCLUDED.raw_safe,last_seen_at=NOW(),last_sync_run_id=EXCLUDED.last_sync_run_id`,
-          [d.id,serial||null,normalized||null,d.product,d.model,d.mac,d.deviceType,d.connectionStatus,d.personId,d.personEmail,d.workspaceId,d.workspaceName,d.locationId,d.displayName,JSON.stringify(d),runId]);
+        await client.query(`INSERT INTO webex_device_snapshots(webex_device_id,serial_number,normalized_serial,product,model,mac,device_type,connection_status,person_id,person_email,person_name,workspace_id,workspace_name,location_id,location_name,suggested_branch_name,display_name,raw_safe,last_seen_at,last_sync_run_id)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,NOW(),$18)
+          ON CONFLICT(webex_device_id) DO UPDATE SET serial_number=EXCLUDED.serial_number,normalized_serial=EXCLUDED.normalized_serial,product=EXCLUDED.product,model=EXCLUDED.model,mac=EXCLUDED.mac,device_type=EXCLUDED.device_type,connection_status=EXCLUDED.connection_status,person_id=EXCLUDED.person_id,person_email=EXCLUDED.person_email,person_name=EXCLUDED.person_name,workspace_id=EXCLUDED.workspace_id,workspace_name=EXCLUDED.workspace_name,location_id=EXCLUDED.location_id,location_name=EXCLUDED.location_name,suggested_branch_name=EXCLUDED.suggested_branch_name,display_name=EXCLUDED.display_name,raw_safe=EXCLUDED.raw_safe,last_seen_at=NOW(),last_sync_run_id=EXCLUDED.last_sync_run_id`,
+          [d.id,serial||null,normalized||null,d.product,d.model,d.mac,d.deviceType,d.connectionStatus,d.personId,d.personEmail,d.personName,d.workspaceId,d.workspaceName,d.locationId,d.locationName,d.suggestedBranchName,d.displayName,JSON.stringify(d),runId]);
         const alertType = !normalized ? 'serial_unavailable' : !knownSerials.has(normalized) ? 'unknown_serial' : null;
         if (alertType) {
-          await client.query(`INSERT INTO webex_device_alerts(alert_type,webex_device_id,normalized_serial,serial_number,product,mac,display_name,person_email,workspace_id,workspace_name,status)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'new')
-            ON CONFLICT(alert_type,webex_device_id,normalized_serial) DO UPDATE SET serial_number=EXCLUDED.serial_number,product=EXCLUDED.product,mac=EXCLUDED.mac,display_name=EXCLUDED.display_name,person_email=EXCLUDED.person_email,workspace_id=EXCLUDED.workspace_id,workspace_name=EXCLUDED.workspace_name,last_seen_at=NOW(),updated_at=NOW()`,
-            [alertType,d.id,normalized,serial||null,d.product,d.mac,d.displayName,d.personEmail,d.workspaceId,d.workspaceName]);
+          await client.query(`INSERT INTO webex_device_alerts(alert_type,webex_device_id,normalized_serial,serial_number,product,mac,display_name,person_email,person_name,workspace_id,workspace_name,location_name,suggested_branch_name,status)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'new')
+            ON CONFLICT(alert_type,webex_device_id,normalized_serial) DO UPDATE SET serial_number=EXCLUDED.serial_number,product=EXCLUDED.product,mac=EXCLUDED.mac,display_name=EXCLUDED.display_name,person_email=EXCLUDED.person_email,person_name=EXCLUDED.person_name,workspace_id=EXCLUDED.workspace_id,workspace_name=EXCLUDED.workspace_name,location_name=EXCLUDED.location_name,suggested_branch_name=EXCLUDED.suggested_branch_name,last_seen_at=NOW(),updated_at=NOW()`,
+            [alertType,d.id,normalized,serial||null,d.product,d.mac,d.displayName,d.personEmail,d.personName,d.workspaceId,d.workspaceName,d.locationName,d.suggestedBranchName]);
           if (normalized) await client.query("UPDATE webex_device_alerts SET status='resolved',resolution_reason='serial now available from Webex',resolved_at=NOW(),updated_at=NOW() WHERE alert_type='serial_unavailable' AND webex_device_id=$1 AND status<>'resolved'",[d.id]);
         } else {
           await client.query("UPDATE webex_device_alerts SET status='resolved',resolution_reason='serial matched in Asset Client',resolved_at=NOW(),updated_at=NOW() WHERE alert_type='unknown_serial' AND webex_device_id=$1 AND status<>'resolved'",[d.id]);
@@ -622,7 +687,7 @@ app.post('/api/admin/webex/sync', requireAuth, requireAdmin, async (req,res,next
 app.get('/api/admin/webex/alerts', requireAuth, requireAdmin, async (req,res,next) => {
   try {
     const status = ['new','acknowledged','resolved'].includes(req.query.status) ? req.query.status : null;
-    const r = await pool.query(`SELECT id,alert_type AS "alertType",webex_device_id AS "webexDeviceId",serial_number AS "serialNumber",product,mac,display_name AS "displayName",person_email AS "personEmail",workspace_id AS "workspaceId",workspace_name AS "workspaceName",status,resolution_reason AS "resolutionReason",first_seen_at AS "firstSeenAt",last_seen_at AS "lastSeenAt",updated_at AS "updatedAt" FROM webex_device_alerts WHERE ($1::text IS NULL OR status=$1) ORDER BY CASE status WHEN 'new' THEN 0 WHEN 'acknowledged' THEN 1 ELSE 2 END,last_seen_at DESC LIMIT 1000`,[status]);
+    const r = await pool.query(`SELECT id,alert_type AS "alertType",webex_device_id AS "webexDeviceId",serial_number AS "serialNumber",product,mac,display_name AS "displayName",person_email AS "personEmail",person_name AS "personName",workspace_id AS "workspaceId",workspace_name AS "workspaceName",location_name AS "locationName",suggested_branch_name AS "suggestedBranchName",status,resolution_reason AS "resolutionReason",first_seen_at AS "firstSeenAt",last_seen_at AS "lastSeenAt",updated_at AS "updatedAt" FROM webex_device_alerts WHERE ($1::text IS NULL OR status=$1) ORDER BY CASE status WHEN 'new' THEN 0 WHEN 'acknowledged' THEN 1 ELSE 2 END,last_seen_at DESC LIMIT 1000`,[status]);
     res.json({ alerts: r.rows });
   } catch(e) { next(e); }
 });
