@@ -100,7 +100,7 @@ function finance(){
      return sum+Math.max(0,Number(p.totalCost)||0)*(Math.min(Number(a.quantity)||0,Number(p.quantity)||0)/Math.max(1,Number(p.quantity)||1))/term;
    },0);
    const deviceCost=ds.reduce((sum,d)=>sum+Math.max(0,Number(d.purchaseCost)||0)/Math.max(1,Number(d.usefulLifeMonths)||36),0);
-   const rev=Math.max(0,Number(b.monthlyRevenue)||0);
+   const rev=Math.max(0,Number(b.monthlyRevenue)||0)+db.devices.filter(d=>d.branchId===b.id&&d.contractType==='NOL'&&d.activationDate&&d.activationDate<=dateNow()&&d.status!=='Dismesso').reduce((sum,d)=>sum+Math.max(0,Number(d.monthlyFee)||0),0);
    return '<tr><td>'+esc((b.ragioneSociale?b.ragioneSociale+' — ':'')+b.name)+'</td><td>'+money(rev)+'</td><td>'+money(allocated)+'</td><td>'+money(deviceCost)+'</td><td><b>'+money(rev-allocated-deviceCost)+'</b></td><td><button data-revenue="'+b.id+'">Imposta canone</button> <button data-license-toggle="'+b.id+'">'+(b.licenseFeeActive?'Disattiva canone licenze':'Attiva canone licenze')+'</button></td></tr>';
  }).join('');
  return (selectedBranchId?'<div class="filter-context"><span class="pill">Finance filtrato per: '+esc(branchName(selectedBranchId))+'</span><span class="muted">Il canone licenze viene applicato solo alle filiali in cui è attivo.</span></div>':'')+
