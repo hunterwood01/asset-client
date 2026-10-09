@@ -9,6 +9,7 @@
 - Persistent, deduplicated alerts for Webex devices whose serial is not in the shared Asset Client inventory; a separate alert type is used when a serial is not exposed.
 - Best-effort enrichment from Webex workspace, people and location directory APIs. Optional directory reads that are not authorized do not invalidate the device inventory sync; missing assignment/location details remain blank.
 - A suggested branch only when a normalized location/workspace/device name exactly matches one known branch field. Suggestions never modify the asset or branch automatically.
+- Cisco EoX lookup by exact PID using the official Cisco Support API, OAuth client-credentials token flow, cached lifecycle milestones and an administrator UI table.
 - **Device da gestire** Dashboard entry and queue for incomplete Asset Client device data plus unresolved Webex alerts for administrators.
 - A **Checklist** tab inside each branch detail page. It intentionally remains empty until the user supplies the technician checklist.
 - Administrative actions flow through the existing audit middleware.
@@ -17,11 +18,13 @@
 
 Set `WEBEX_ACCESS_TOKEN` in the server's secret store/environment. Do not commit a real token to `.env`, source control, browser storage or screenshots. Use a token authorized for the target organization and the minimum read scopes needed for the Devices API. To enrich assignment and location data, the token may also need read scopes for workspaces, people and locations. The connector does not request or use Webex write operations.
 
+For Cisco lifecycle lookups, register an application in the Cisco API Console with Support APIs / EoX access and set `CISCO_EOX_CLIENT_ID` and `CISCO_EOX_CLIENT_SECRET` in the server secret store. The server obtains a short-lived access token from `https://id.cisco.com/oauth2/default/v1/token`; credentials and tokens are never sent to the browser. The admin UI accepts an exact PID and stores the returned EoX milestones with source and verification time.
+
 The token is currently supplied out-of-band by the administrator. Interactive OAuth authorization/refresh management is not part of this foundation and must be implemented before production rollout if a static token is not an acceptable operational model.
 
 ## Important limitations / follow-up
 
-- Cisco EoX lifecycle lookup and its product-catalog UI are not implemented in this code change. The official API requires separate Cisco Support API credentials and must be added as a separate, verified integration. Do not interpret an empty lifecycle value as “not end-of-life”.
+- Cisco EoX lookup is available as an administrator-entered exact PID search in the Webex/admin area. Automatic scheduled refresh and integration of cached milestones directly into every product/device detail view are not implemented yet. An empty lifecycle value must not be interpreted as “not end-of-life”.
 - Directory enrichment is best-effort; if the token lacks the relevant scopes, person/workspace/location names may not be available.
 - Branch association is a suggestion only. Asset Client's NETWORK branch list remains authoritative, and this change does not write suggested assignments into inventory.
 - Disk usage measures the filesystem visible from the API process working directory. If the application runs in a container, this may be the container filesystem rather than the host's total disk.
