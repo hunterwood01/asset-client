@@ -499,12 +499,14 @@
   <script>
     const root = document.documentElement;
     const btn = document.getElementById('themeToggle');
-    let dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const savedTheme = localStorage.getItem('asset-client-theme');
+    let dark = savedTheme ? savedTheme === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
     root.setAttribute('data-theme', dark ? 'dark' : 'light');
 
     btn.addEventListener('click', () => {
       dark = !dark;
       root.setAttribute('data-theme', dark ? 'dark' : 'light');
+      localStorage.setItem('asset-client-theme', dark ? 'dark' : 'light');
     });
   </script>
   <script src="./inventory.js"></script>
