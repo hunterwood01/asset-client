@@ -342,17 +342,14 @@ app.post('/api/admin/role-preview', requireAuth, async (req,res,next) => {
     if (!['admin','operator'].includes(role)) return res.status(400).json({ error: 'Ruolo di test non valido' });
     req.session.rolePreview = { adminUserId: Number(req.realUser.id), role, startedAt: new Date().toISOString() };
     await new Promise((resolve,reject)=>req.session.save(err=>err?reject(err):resolve()));
-    await pool.query("INSERT INTO audit_log(actor_user_id,action,method,endpoint,details,status_code) VALUES($1,$2,'POST','/api/admin/role-preview',$3::jsonb,200)", [req.realUser.id, 'Avvio simulazione ruolo', JSON.stringify({ simulatedRole: role })]);
     res.json({ user: publicUser({ ...req.realUser, role }), rolePreview: { active: true, role, startedAt: req.session.rolePreview.startedAt } });
   } catch(e) { next(e); }
 });
 app.post('/api/admin/role-preview/stop', requireAuth, async (req,res,next) => {
   try {
     if (req.realUser?.role !== 'admin' || req.session.rolePreview?.adminUserId !== Number(req.realUser.id)) return res.status(403).json({ error: 'Nessuna simulazione ruolo autorizzata da terminare' });
-    const simulatedRole = req.session.rolePreview.role;
     delete req.session.rolePreview;
     await new Promise((resolve,reject)=>req.session.save(err=>err?reject(err):resolve()));
-    await pool.query("INSERT INTO audit_log(actor_user_id,action,method,endpoint,details,status_code) VALUES($1,$2,'POST','/api/admin/role-preview/stop',$3::jsonb,200)", [req.realUser.id, 'Termine simulazione ruolo', JSON.stringify({ simulatedRole })]);
     res.json({ user: publicUser(req.realUser), rolePreview: { active: false } });
   } catch(e) { next(e); }
 });
