@@ -55,6 +55,29 @@ app.use(session({
   }
 }));
 
+// Audit di tutte le richieste API che modificano dati; nessuna scadenza automatica dei record.
+function auditSafe(value, key = '') {
+  if (/password|token|secret|authorization|cookie/i.test(key)) return '[redatto]';
+  if (Array.isArray(value)) return value.slice(0, 100).map(v => auditSafe(v));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).slice(0, 100).map(([k, v]) => [k, auditSafe(v, k)]));
+  if (typeof value === 'string') return value.slice(0, 1000);
+  return value;
+}
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/') || !['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) || ['/api/auth/login', '/api/auth/logout'].includes(req.path)) return next();
+  res.on('finish', () => {
+    const userId = req.session?.userId;
+    if (!userId || res.statusCode < 200 || res.statusCode >= 400) return;
+    let details = auditSafe(req.body || {});
+    if (req.path === '/api/inventory-state' && req.method === 'PUT') {
+      const state = req.body?.state || {};
+      details = { revision: req.body?.revision ?? null, counts: { branches: state.branches?.length || 0, devices: state.devices?.length || 0, purchases: state.purchases?.length || 0 }, fields: Object.keys(state) };
+    }
+    pool.query('INSERT INTO audit_log(actor_user_id, action, method, endpoint, entity_id, details, status_code) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)', [userId, req.method + ' ' + req.path, req.method, req.path, req.params?.id || null, JSON.stringify(details), res.statusCode]).catch(err => console.error('Audit insert failed:', err.message));
+  });
+  next();
+});
+
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,
@@ -80,6 +103,22 @@ async function initialize() {
   `);
 
   await pool.query('ALTER TABLE app_users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE');
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id BIGSERIAL PRIMARY KEY,
+      actor_user_id BIGINT REFERENCES app_users(id) ON DELETE SET NULL,
+      action TEXT NOT NULL,
+      method TEXT NOT NULL,
+      endpoint TEXT NOT NULL,
+      entity_id TEXT,
+      details JSONB NOT NULL DEFAULT '{}'::jsonb,
+      status_code INTEGER NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS audit_log_created_at_idx ON audit_log(created_at DESC);
+    CREATE INDEX IF NOT EXISTS audit_log_actor_idx ON audit_log(actor_user_id, created_at DESC);
+  `);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -205,6 +244,15 @@ app.post('/api/auth/logout', (req, res) => {
     res.clearCookie('assetclient.sid', { httpOnly: true, secure: production, sameSite: 'strict' });
     res.status(204).end();
   });
+});
+
+app.get('/api/admin/audit', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+    const before = req.query.before ? Number(req.query.before) : null;
+    const result = await pool.query(`SELECT a.id, a.action, a.method, a.endpoint, a.entity_id, a.details, a.status_code, a.created_at, u.username AS actor_username FROM audit_log a LEFT JOIN app_users u ON u.id=a.actor_user_id WHERE ($1::bigint IS NULL OR a.id<$1) ORDER BY a.id DESC LIMIT $2`, [Number.isSafeInteger(before) && before > 0 ? before : null, limit]);
+    res.json({ events: result.rows, retention: 'forever' });
+  } catch (error) { next(error); }
 });
 
 app.get('/api/admin/users', requireAuth, requireAdmin, async (_req, res, next) => {
