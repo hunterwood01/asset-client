@@ -121,6 +121,95 @@ async function initialize() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS webex_sync_runs (
+      id BIGSERIAL PRIMARY KEY,
+      status TEXT NOT NULL CHECK (status IN ('running','success','error')),
+      started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      finished_at TIMESTAMPTZ,
+      records_read INTEGER NOT NULL DEFAULT 0,
+      error_message TEXT,
+      created_by BIGINT REFERENCES app_users(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS webex_sync_runs_started_idx ON webex_sync_runs(started_at DESC);
+    CREATE TABLE IF NOT EXISTS webex_device_snapshots (
+      webex_device_id TEXT PRIMARY KEY,
+      serial_number TEXT,
+      normalized_serial TEXT,
+      product TEXT,
+      model TEXT,
+      mac TEXT,
+      device_type TEXT,
+      connection_status TEXT,
+      person_id TEXT,
+      person_email TEXT,
+      person_name TEXT,
+      workspace_id TEXT,
+      workspace_name TEXT,
+      location_id TEXT,
+      location_name TEXT,
+      suggested_branch_name TEXT,
+      display_name TEXT,
+      raw_safe JSONB NOT NULL DEFAULT '{}'::jsonb,
+      first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_sync_run_id BIGINT REFERENCES webex_sync_runs(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS webex_device_serial_idx ON webex_device_snapshots(normalized_serial);
+    CREATE TABLE IF NOT EXISTS webex_device_alerts (
+      id BIGSERIAL PRIMARY KEY,
+      alert_type TEXT NOT NULL CHECK (alert_type IN ('unknown_serial','serial_unavailable')),
+      webex_device_id TEXT NOT NULL,
+      normalized_serial TEXT NOT NULL DEFAULT '',
+      serial_number TEXT,
+      product TEXT,
+      mac TEXT,
+      display_name TEXT,
+      person_email TEXT,
+      person_name TEXT,
+      workspace_id TEXT,
+      workspace_name TEXT,
+      location_name TEXT,
+      suggested_branch_name TEXT,
+      status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','acknowledged','resolved')),
+      resolution_reason TEXT,
+      first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      resolved_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(alert_type, webex_device_id, normalized_serial)
+    );
+    CREATE INDEX IF NOT EXISTS webex_device_alerts_status_idx ON webex_device_alerts(status, last_seen_at DESC);
+  `);
+
+  await pool.query(`
+    ALTER TABLE webex_device_snapshots ADD COLUMN IF NOT EXISTS person_name TEXT;
+    ALTER TABLE webex_device_snapshots ADD COLUMN IF NOT EXISTS location_name TEXT;
+    ALTER TABLE webex_device_snapshots ADD COLUMN IF NOT EXISTS suggested_branch_name TEXT;
+    ALTER TABLE webex_device_alerts ADD COLUMN IF NOT EXISTS person_name TEXT;
+    ALTER TABLE webex_device_alerts ADD COLUMN IF NOT EXISTS location_name TEXT;
+    ALTER TABLE webex_device_alerts ADD COLUMN IF NOT EXISTS suggested_branch_name TEXT;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cisco_product_lifecycle (
+      product_id TEXT PRIMARY KEY,
+      product_description TEXT,
+      bulletin_number TEXT,
+      bulletin_url TEXT,
+      announcement_date TEXT,
+      end_of_sale_date TEXT,
+      end_of_sw_maintenance_date TEXT,
+      end_of_security_support_date TEXT,
+      last_date_of_support TEXT,
+      end_of_service_contract_renewal TEXT,
+      source_url TEXT NOT NULL,
+      checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      response_status TEXT NOT NULL,
+      raw_response JSONB NOT NULL DEFAULT '{}'::jsonb
+    );
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version TEXT PRIMARY KEY,
       applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -181,7 +270,10 @@ async function requireAuth(req, res, next) {
       req.session.destroy(() => {});
       return res.status(401).json({ error: 'Sessione non valida' });
     }
-    req.user = user;
+    req.realUser = user;
+    req.user = req.session.rolePreview && req.session.rolePreview.adminUserId === Number(user.id)
+      ? { ...user, role: req.session.rolePreview.role }
+      : user;
     if (user.must_change_password && !['/api/auth/me', '/api/auth/change-password', '/api/auth/logout'].includes(req.path)) {
       return res.status(403).json({ error: 'Devi cambiare la password prima di continuare', code: 'PASSWORD_CHANGE_REQUIRED' });
     }
@@ -237,7 +329,30 @@ app.post('/api/auth/change-password', requireAuth, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.get('/api/auth/me', requireAuth, (req, res) => res.json({ user: publicUser(req.user) }));
+app.get('/api/auth/me', requireAuth, (req, res) => res.json({
+  user: publicUser(req.user),
+  rolePreview: req.session.rolePreview ? { active: true, role: req.session.rolePreview.role, startedAt: req.session.rolePreview.startedAt } : { active: false }
+}));
+
+// Admin-only test mode: changes effective authorization role for this session, never the user's stored role.
+app.post('/api/admin/role-preview', requireAuth, async (req,res,next) => {
+  try {
+    if (req.realUser?.role !== 'admin') return res.status(403).json({ error: 'Solo un amministratore reale può avviare la simulazione ruoli' });
+    const role = req.body?.role;
+    if (!['admin','operator'].includes(role)) return res.status(400).json({ error: 'Ruolo di test non valido' });
+    req.session.rolePreview = { adminUserId: Number(req.realUser.id), role, startedAt: new Date().toISOString() };
+    await new Promise((resolve,reject)=>req.session.save(err=>err?reject(err):resolve()));
+    res.json({ user: publicUser({ ...req.realUser, role }), rolePreview: { active: true, role, startedAt: req.session.rolePreview.startedAt } });
+  } catch(e) { next(e); }
+});
+app.post('/api/admin/role-preview/stop', requireAuth, async (req,res,next) => {
+  try {
+    if (req.realUser?.role !== 'admin' || req.session.rolePreview?.adminUserId !== Number(req.realUser.id)) return res.status(403).json({ error: 'Nessuna simulazione ruolo autorizzata da terminare' });
+    delete req.session.rolePreview;
+    await new Promise((resolve,reject)=>req.session.save(err=>err?reject(err):resolve()));
+    res.json({ user: publicUser(req.realUser), rolePreview: { active: false } });
+  } catch(e) { next(e); }
+});
 app.post('/api/auth/logout', (req, res) => {
   req.session.destroy(error => {
     if (error) return res.status(500).json({ error: 'Impossibile chiudere la sessione' });
@@ -431,6 +546,262 @@ app.put('/api/inventory-state',requireAuth,requireOperator,async(req,res,next)=>
  const next=actual+1;await c.query('INSERT INTO shared_inventory_state(id,state,revision,updated_at,updated_by) VALUES(1,$1::jsonb,$2,NOW(),$3) ON CONFLICT(id) DO UPDATE SET state=EXCLUDED.state,revision=EXCLUDED.revision,updated_at=NOW(),updated_by=EXCLUDED.updated_by',[encoded,next,req.user.id]);await c.query('COMMIT');res.json({revision:next,updatedAt:new Date().toISOString()});
  }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
 }catch(e){next(e);}});
+
+
+// Read-only operational health checks. Missing deployment metrics are reported as unavailable.
+let ciscoEoxToken = '';
+let ciscoEoxTokenExpiresAt = 0;
+async function getCiscoEoxToken() {
+  if (ciscoEoxToken && Date.now() < ciscoEoxTokenExpiresAt - 60000) return ciscoEoxToken;
+  const id = process.env.CISCO_EOX_CLIENT_ID, secret = process.env.CISCO_EOX_CLIENT_SECRET;
+  if (!id || !secret) throw Object.assign(new Error('Cisco Support API non configurata: mancano le credenziali EoX.'), { statusCode: 409 });
+  const body = new URLSearchParams({ grant_type: 'client_credentials', client_id: id, client_secret: secret });
+  const response = await fetch('https://id.cisco.com/oauth2/default/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }, body, signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error('Autenticazione Cisco Support API fallita (HTTP ' + response.status + ')');
+  const data = await response.json();
+  if (!data.access_token) throw new Error('Cisco Support API non ha restituito un access token');
+  ciscoEoxToken = data.access_token;
+  ciscoEoxTokenExpiresAt = Date.now() + Math.max(60, Number(data.expires_in) || 3600) * 1000;
+  return ciscoEoxToken;
+}
+app.get('/api/admin/lifecycle', requireAuth, requireAdmin, async (_req,res,next) => {
+  try {
+    const r = await pool.query('SELECT product_id AS "productId",product_description AS "productDescription",bulletin_number AS "bulletinNumber",bulletin_url AS "bulletinUrl",announcement_date AS "announcementDate",end_of_sale_date AS "endOfSaleDate",end_of_sw_maintenance_date AS "endOfSwMaintenanceDate",end_of_security_support_date AS "endOfSecuritySupportDate",last_date_of_support AS "lastDateOfSupport",end_of_service_contract_renewal AS "endOfServiceContractRenewal",source_url AS "sourceUrl",checked_at AS "checkedAt",response_status AS "responseStatus" FROM cisco_product_lifecycle ORDER BY product_id LIMIT 500');
+    res.json({ configured: Boolean(process.env.CISCO_EOX_CLIENT_ID && process.env.CISCO_EOX_CLIENT_SECRET), products: r.rows });
+  } catch(e) { next(e); }
+});
+app.post('/api/admin/lifecycle/lookup', requireAuth, requireAdmin, async (req,res,next) => {
+  try {
+    const productId = cleanString(req.body?.productId, 250);
+    if (!productId || /[,/?#]/.test(productId)) return res.status(400).json({ error: 'Inserisci un PID Cisco esatto, senza wildcard o liste multiple.' });
+    const token = await getCiscoEoxToken();
+    const sourceUrl = 'https://apix.cisco.com/supporttools/eox/rest/5/EOXByProductID/1/' + encodeURIComponent(productId) + '?responseencoding=json';
+    const response = await fetch(sourceUrl, { headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' }, signal: AbortSignal.timeout(20000) });
+    if (!response.ok) throw new Error('Cisco EoX API ha restituito HTTP ' + response.status);
+    const body = await response.json();
+    const raw = Array.isArray(body.EOXRecord) ? body.EOXRecord[0] : body.EOXRecord;
+    if (!raw) return res.status(404).json({ error: body.EOXError?.ErrorDescription || 'Nessun record EoX restituito per il PID esatto.' });
+    const dateValue = v => typeof v === 'string' ? v.trim() : (v && typeof v.value === 'string' ? v.value.trim() : '');
+    const values = {
+      productId: cleanString(raw.EOLProductID || productId, 250),
+      description: cleanString(raw.ProductIDDescription, 500),
+      bulletin: cleanString(raw.ProductBulletinNumber, 100),
+      bulletinUrl: cleanString(raw.LinkToProductBulletinURL, 1000),
+      announcement: dateValue(raw.EOXExternalAnnouncementDate),
+      endSale: dateValue(raw.EndOfSaleDate),
+      endSw: dateValue(raw.EndOfSWMaintenanceReleases),
+      endSecurity: dateValue(raw.EndOfSecurityVulSupportDate),
+      lastSupport: dateValue(raw.LastDateOfSupport),
+      contractRenewal: dateValue(raw.EndOfServiceContractRenewal)
+    };
+    await pool.query(`INSERT INTO cisco_product_lifecycle(product_id,product_description,bulletin_number,bulletin_url,announcement_date,end_of_sale_date,end_of_sw_maintenance_date,end_of_security_support_date,last_date_of_support,end_of_service_contract_renewal,source_url,checked_at,response_status,raw_response)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),'success',$12::jsonb)
+      ON CONFLICT(product_id) DO UPDATE SET product_description=EXCLUDED.product_description,bulletin_number=EXCLUDED.bulletin_number,bulletin_url=EXCLUDED.bulletin_url,announcement_date=EXCLUDED.announcement_date,end_of_sale_date=EXCLUDED.end_of_sale_date,end_of_sw_maintenance_date=EXCLUDED.end_of_sw_maintenance_date,end_of_security_support_date=EXCLUDED.end_of_security_support_date,last_date_of_support=EXCLUDED.last_date_of_support,end_of_service_contract_renewal=EXCLUDED.end_of_service_contract_renewal,source_url=EXCLUDED.source_url,checked_at=NOW(),response_status='success',raw_response=EXCLUDED.raw_response`,
+      [values.productId,values.description,values.bulletin,values.bulletinUrl,values.announcement,values.endSale,values.endSw,values.endSecurity,values.lastSupport,values.contractRenewal,sourceUrl,JSON.stringify(raw)]);
+    res.json({ product: { productId: values.productId, productDescription: values.description, bulletinNumber: values.bulletin, bulletinUrl: values.bulletinUrl, announcementDate: values.announcement, endOfSaleDate: values.endSale, endOfSwMaintenanceDate: values.endSw, endOfSecuritySupportDate: values.endSecurity, lastDateOfSupport: values.lastSupport, endOfServiceContractRenewal: values.contractRenewal, sourceUrl, checkedAt: new Date().toISOString(), responseStatus: 'success' } });
+  } catch(e) { if(e.statusCode) return res.status(e.statusCode).json({ error: e.message }); next(e); }
+});
+
+app.get('/api/admin/system-status', requireAuth, requireAdmin, async (_req, res) => {
+  const checkedAt = new Date().toISOString();
+  const checks = [];
+  checks.push({ id: 'api', label: 'Applicazione e API', status: 'ok', message: 'Endpoint API raggiungibile', checkedAt, details: { uptimeSeconds: Math.floor(process.uptime()), nodeVersion: process.version } });
+  try {
+    const started = Date.now();
+    await pool.query('SELECT 1');
+    checks.push({ id: 'database', label: 'Database', status: 'ok', message: 'Connessione e query di verifica riuscite', checkedAt, details: { latencyMs: Date.now() - started } });
+  } catch {
+    checks.push({ id: 'database', label: 'Database', status: 'error', message: 'Connessione o query di verifica non riuscita', checkedAt, details: {} });
+  }
+  try {
+    const stat = await fs.statfs(process.cwd());
+    const totalBytes = Number(stat.blocks) * Number(stat.bsize);
+    const availableBytes = Number(stat.bavail) * Number(stat.bsize);
+    const usedPercent = totalBytes > 0 ? Math.round(((totalBytes - availableBytes) / totalBytes) * 1000) / 10 : null;
+    const status = usedPercent === null ? 'unknown' : usedPercent >= 95 ? 'error' : usedPercent >= 85 ? 'warning' : 'ok';
+    checks.push({ id: 'disk', label: 'Spazio disco', status, message: usedPercent === null ? 'Metriche disco non disponibili' : usedPercent >= 95 ? 'Spazio disco critico' : usedPercent >= 85 ? 'Spazio disco in esaurimento' : 'Spazio disco nella soglia prevista', checkedAt, details: { totalBytes, availableBytes, usedPercent, path: process.cwd() } });
+  } catch {
+    checks.push({ id: 'disk', label: 'Spazio disco', status: 'unknown', message: 'Metriche disco non disponibili in questo ambiente', checkedAt, details: {} });
+  }
+  const configured = Boolean(process.env.WEBEX_ACCESS_TOKEN);
+  let webex = { id: 'webex', label: 'Connettore Webex', status: 'unknown', message: configured ? 'Token configurato; sincronizzazione da verificare' : 'Non configurato: manca WEBEX_ACCESS_TOKEN', checkedAt, details: { configured } };
+  try {
+    const r = await pool.query('SELECT status, started_at, finished_at, records_read, error_message FROM webex_sync_runs ORDER BY id DESC LIMIT 1');
+    if (r.rowCount) {
+      const last = r.rows[0];
+      webex = { ...webex, status: last.status === 'success' ? 'ok' : last.status === 'error' ? 'error' : 'warning', message: last.status === 'success' ? 'Ultima sincronizzazione completata' : last.error_message || 'Ultima sincronizzazione non completata', details: { ...webex.details, lastStatus: last.status, startedAt: last.started_at, finishedAt: last.finished_at, recordsRead: last.records_read } };
+    }
+  } catch {
+    webex = { ...webex, status: 'unknown', message: 'Stato sincronizzazione non disponibile', details: { configured } };
+  }
+  try {
+    const r = await pool.query('SELECT status, started_at, finished_at, records_read, error_message FROM webex_sync_runs ORDER BY id DESC LIMIT 10');
+    checks.push({ id: 'jobs', label: 'Sincronizzazioni e processi', status: r.rows.some(x => x.status === 'error') ? 'warning' : 'ok', message: r.rowCount ? 'Storico delle sincronizzazioni disponibile' : 'Nessuna sincronizzazione eseguita', checkedAt, details: { recentRuns: r.rows } });
+  } catch {
+    checks.push({ id: 'jobs', label: 'Sincronizzazioni e processi', status: 'unknown', message: 'Storico processi non disponibile', checkedAt, details: {} });
+  }
+  checks.push(webex);
+  const eoxConfigured = Boolean(process.env.CISCO_EOX_CLIENT_ID && process.env.CISCO_EOX_CLIENT_SECRET);
+  checks.push({ id: 'cisco-eox', label: 'Cisco EoX', status: eoxConfigured ? 'unknown' : 'unknown', message: eoxConfigured ? 'Credenziali configurate; ultima verifica da eseguire con una ricerca PID' : 'Non configurato: mancano le credenziali Cisco Support API', checkedAt, details: { configured: eoxConfigured } });
+  const order = { error: 0, warning: 1, unknown: 2, ok: 3 };
+  res.json({ checkedAt, overall: checks.some(x => x.status === 'error') ? 'error' : checks.some(x => x.status === 'warning') ? 'warning' : checks.some(x => x.status === 'unknown') ? 'unknown' : 'ok', checks: checks.sort((a,b) => (order[a.status] ?? 2) - (order[b.status] ?? 2)) });
+});
+
+function normalizeSerial(value) {
+  return String(value || '').trim().replace(/\s+/g, '').toUpperCase();
+}
+function webexSafeDevice(d) {
+  return {
+    id: String(d.id || ''),
+    serialNumber: typeof d.serial === 'string' ? d.serial.trim() : '',
+    product: cleanString(d.product, 200),
+    model: cleanString(d.model, 200),
+    mac: cleanString(d.mac, 100),
+    deviceType: cleanString(d.type, 100),
+    connectionStatus: cleanString(d.connectionStatus, 100),
+    personId: cleanString(d.personId, 200),
+    personEmail: cleanString(d.personEmail, 320),
+    personName: cleanString(d.personName, 200),
+    workspaceId: cleanString(d.workspaceId, 200),
+    workspaceName: cleanString(d.workspaceName, 200),
+    locationId: cleanString(d.locationId, 200),
+    locationName: cleanString(d.locationName, 200),
+    suggestedBranchName: cleanString(d.suggestedBranchName, 200),
+    displayName: cleanString(d.displayName || d.name, 200)
+  };
+}
+app.get('/api/admin/webex/status', requireAuth, requireAdmin, async (_req,res,next) => {
+  try {
+    const [run, counts, alerts] = await Promise.all([
+      pool.query('SELECT id,status,started_at,finished_at,records_read,error_message FROM webex_sync_runs ORDER BY id DESC LIMIT 1'),
+      pool.query('SELECT COUNT(*)::int AS devices FROM webex_device_snapshots'),
+      pool.query("SELECT status,COUNT(*)::int AS count FROM webex_device_alerts GROUP BY status")
+    ]);
+    res.json({ configured: Boolean(process.env.WEBEX_ACCESS_TOKEN), lastRun: run.rows[0] || null, deviceCount: counts.rows[0].devices, alerts: alerts.rows, message: process.env.WEBEX_ACCESS_TOKEN ? null : 'Configura WEBEX_ACCESS_TOKEN nel secret store dell’ambiente server per abilitare la sincronizzazione.' });
+  } catch(e) { next(e); }
+});
+app.post('/api/admin/webex/sync', requireAuth, requireAdmin, async (req,res,next) => {
+  if (!process.env.WEBEX_ACCESS_TOKEN) return res.status(409).json({ error: 'Connettore non configurato: imposta WEBEX_ACCESS_TOKEN lato server.' });
+  const run = await pool.query("INSERT INTO webex_sync_runs(status,created_by) VALUES('running',$1) RETURNING id", [req.user.id]);
+  const runId = run.rows[0].id;
+  try {
+    let nextUrl = 'https://webexapis.com/v1/devices?max=100';
+    const devices = [];
+    let pages = 0;
+    while (nextUrl) {
+      if (++pages > 1000) throw new Error('Limite di paginazione superato');
+      if (new URL(nextUrl).hostname !== 'webexapis.com') throw new Error('URL di paginazione Webex non autorizzato');
+      const response = await fetch(nextUrl, { headers: { Authorization: 'Bearer ' + process.env.WEBEX_ACCESS_TOKEN, Accept: 'application/json' }, signal: AbortSignal.timeout(20000) });
+      if (!response.ok) {
+        const status = response.status;
+        throw new Error(status === 401 || status === 403 ? 'Autorizzazione Webex non valida o permessi di lettura insufficienti (HTTP ' + status + ')' : 'API Webex ha restituito HTTP ' + status);
+      }
+      const body = await response.json();
+      if (!Array.isArray(body.items)) throw new Error('Risposta API Webex inattesa: elenco dispositivi assente');
+      devices.push(...body.items.map(webexSafeDevice).filter(d => d.id));
+      const link = response.headers.get('link') || '';
+      const match = link.match(/<([^>]+)>;\\s*rel="?next"?/i);
+      nextUrl = match ? match[1] : '';
+      if (devices.length > 100000) throw new Error('Limite di dispositivi superato');
+    }
+    // Directory enrichment is best-effort: a missing optional read scope must not invalidate the complete device inventory.
+    async function readDirectory(url) {
+      const items = [];
+      let target = url, count = 0;
+      try {
+        while (target) {
+          if (++count > 100) throw new Error('Directory pagination limit');
+          if (new URL(target).hostname !== 'webexapis.com') return [];
+          const response = await fetch(target, { headers: { Authorization: 'Bearer ' + process.env.WEBEX_ACCESS_TOKEN, Accept: 'application/json' }, signal: AbortSignal.timeout(12000) });
+          if (!response.ok) return [];
+          const body = await response.json();
+          if (!Array.isArray(body.items)) return [];
+          items.push(...body.items);
+          const link = response.headers.get('link') || '';
+          const match = link.match(/<([^>]+)>;\\s*rel="?next"?/i);
+          target = match ? match[1] : '';
+        }
+      } catch { return []; }
+      return items;
+    }
+    const [workspaces, people, locations] = await Promise.all([
+      readDirectory('https://webexapis.com/v1/workspaces?max=100'),
+      readDirectory('https://webexapis.com/v1/people?max=100'),
+      readDirectory('https://webexapis.com/v1/locations?max=100')
+    ]);
+    const workspaceById = new Map(workspaces.map(x => [String(x.id), x]));
+    const personById = new Map(people.map(x => [String(x.id), x]));
+    const locationById = new Map(locations.map(x => [String(x.id), x]));
+    const normLabel = value => String(value || '').trim().normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('it').replace(/[^a-z0-9]/g,'');
+    const inventoryBeforeBranchMatch = await pool.query('SELECT state FROM shared_inventory_state WHERE id=1');
+    const knownBranches = inventoryBeforeBranchMatch.rows[0]?.state?.branches || [];
+    for (const d of devices) {
+      const ws = workspaceById.get(String(d.workspaceId || ''));
+      const person = personById.get(String(d.personId || ''));
+      if (ws) {
+        d.workspaceName = d.workspaceName || cleanString(ws.name, 200);
+        d.locationId = d.locationId || cleanString(ws.locationId, 200);
+      }
+      if (person) {
+        d.personName = d.personName || cleanString(person.displayName || person.name, 200);
+        d.personEmail = d.personEmail || cleanString(Array.isArray(person.emails) ? person.emails[0] : person.email, 320);
+      }
+      const loc = locationById.get(String(d.locationId || ''));
+      if (loc) d.locationName = cleanString(loc.name, 200);
+      const candidates = [d.locationName, d.workspaceName, d.displayName].map(normLabel).filter(Boolean);
+      const matches = knownBranches.filter(b => [b.name,b.city,b.code,b.newName].map(normLabel).some(v => v && candidates.includes(v)));
+      d.suggestedBranchName = matches.length === 1 ? String(matches[0].name || matches[0].city || matches[0].code || '') : '';
+    }
+    const inventory = await pool.query('SELECT state FROM shared_inventory_state WHERE id=1');
+    const assetDevices = inventory.rows[0]?.state?.devices || [];
+    const knownSerials = new Set(assetDevices.map(d => normalizeSerial(d.serial)).filter(Boolean));
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const d of devices) {
+        const serial = d.serialNumber;
+        const normalized = normalizeSerial(serial);
+        await client.query(`INSERT INTO webex_device_snapshots(webex_device_id,serial_number,normalized_serial,product,model,mac,device_type,connection_status,person_id,person_email,person_name,workspace_id,workspace_name,location_id,location_name,suggested_branch_name,display_name,raw_safe,last_seen_at,last_sync_run_id)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,NOW(),$19)
+          ON CONFLICT(webex_device_id) DO UPDATE SET serial_number=EXCLUDED.serial_number,normalized_serial=EXCLUDED.normalized_serial,product=EXCLUDED.product,model=EXCLUDED.model,mac=EXCLUDED.mac,device_type=EXCLUDED.device_type,connection_status=EXCLUDED.connection_status,person_id=EXCLUDED.person_id,person_email=EXCLUDED.person_email,person_name=EXCLUDED.person_name,workspace_id=EXCLUDED.workspace_id,workspace_name=EXCLUDED.workspace_name,location_id=EXCLUDED.location_id,location_name=EXCLUDED.location_name,suggested_branch_name=EXCLUDED.suggested_branch_name,display_name=EXCLUDED.display_name,raw_safe=EXCLUDED.raw_safe,last_seen_at=NOW(),last_sync_run_id=EXCLUDED.last_sync_run_id`,
+          [d.id,serial||null,normalized||null,d.product,d.model,d.mac,d.deviceType,d.connectionStatus,d.personId,d.personEmail,d.personName,d.workspaceId,d.workspaceName,d.locationId,d.locationName,d.suggestedBranchName,d.displayName,JSON.stringify(d),runId]);
+        const alertType = !normalized ? 'serial_unavailable' : !knownSerials.has(normalized) ? 'unknown_serial' : null;
+        if (alertType) {
+          await client.query(`INSERT INTO webex_device_alerts(alert_type,webex_device_id,normalized_serial,serial_number,product,mac,display_name,person_email,person_name,workspace_id,workspace_name,location_name,suggested_branch_name,status)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'new')
+            ON CONFLICT(alert_type,webex_device_id,normalized_serial) DO UPDATE SET serial_number=EXCLUDED.serial_number,product=EXCLUDED.product,mac=EXCLUDED.mac,display_name=EXCLUDED.display_name,person_email=EXCLUDED.person_email,person_name=EXCLUDED.person_name,workspace_id=EXCLUDED.workspace_id,workspace_name=EXCLUDED.workspace_name,location_name=EXCLUDED.location_name,suggested_branch_name=EXCLUDED.suggested_branch_name,last_seen_at=NOW(),updated_at=NOW()`,
+            [alertType,d.id,normalized,serial||null,d.product,d.mac,d.displayName,d.personEmail,d.personName,d.workspaceId,d.workspaceName,d.locationName,d.suggestedBranchName]);
+          if (normalized) await client.query("UPDATE webex_device_alerts SET status='resolved',resolution_reason='serial now available from Webex',resolved_at=NOW(),updated_at=NOW() WHERE alert_type='serial_unavailable' AND webex_device_id=$1 AND status<>'resolved'",[d.id]);
+        } else {
+          await client.query("UPDATE webex_device_alerts SET status='resolved',resolution_reason='serial matched in Asset Client',resolved_at=NOW(),updated_at=NOW() WHERE alert_type='unknown_serial' AND webex_device_id=$1 AND status<>'resolved'",[d.id]);
+          await client.query("UPDATE webex_device_alerts SET status='resolved',resolution_reason='serial now available from Webex',resolved_at=NOW(),updated_at=NOW() WHERE alert_type='serial_unavailable' AND webex_device_id=$1 AND status<>'resolved'",[d.id]);
+        }
+      }
+      await client.query("UPDATE webex_sync_runs SET status='success',finished_at=NOW(),records_read=$1 WHERE id=$2",[devices.length,runId]);
+      await client.query('COMMIT');
+    } catch(e) { await client.query('ROLLBACK').catch(()=>{}); throw e; } finally { client.release(); }
+    res.json({ status: 'success', runId, recordsRead: devices.length });
+  } catch(e) {
+    await pool.query("UPDATE webex_sync_runs SET status='error',finished_at=NOW(),error_message=$1 WHERE id=$2",[String(e.message || 'Errore sincronizzazione').slice(0,500),runId]).catch(()=>{});
+    next(e);
+  }
+});
+app.get('/api/admin/webex/alerts', requireAuth, requireAdmin, async (req,res,next) => {
+  try {
+    const status = ['new','acknowledged','resolved'].includes(req.query.status) ? req.query.status : null;
+    const r = await pool.query(`SELECT id,alert_type AS "alertType",webex_device_id AS "webexDeviceId",serial_number AS "serialNumber",product,mac,display_name AS "displayName",person_email AS "personEmail",person_name AS "personName",workspace_id AS "workspaceId",workspace_name AS "workspaceName",location_name AS "locationName",suggested_branch_name AS "suggestedBranchName",status,resolution_reason AS "resolutionReason",first_seen_at AS "firstSeenAt",last_seen_at AS "lastSeenAt",updated_at AS "updatedAt" FROM webex_device_alerts WHERE ($1::text IS NULL OR status=$1) ORDER BY CASE status WHEN 'new' THEN 0 WHEN 'acknowledged' THEN 1 ELSE 2 END,last_seen_at DESC LIMIT 1000`,[status]);
+    res.json({ alerts: r.rows });
+  } catch(e) { next(e); }
+});
+app.patch('/api/admin/webex/alerts/:id', requireAuth, requireAdmin, async (req,res,next) => {
+  try {
+    const status = req.body?.status;
+    if (!['acknowledged','resolved','new'].includes(status)) return res.status(400).json({ error: 'Stato avviso non valido' });
+    const r = await pool.query("UPDATE webex_device_alerts SET status=$1,resolution_reason=$2,resolved_at=CASE WHEN $1='resolved' THEN NOW() ELSE NULL END,updated_at=NOW() WHERE id=$3 RETURNING id,status,resolution_reason AS \"resolutionReason\",updated_at AS \"updatedAt\"",[status,cleanString(req.body?.resolutionReason,500),Number(req.params.id)]);
+    if (!r.rowCount) return res.status(404).json({ error: 'Avviso non trovato' });
+    res.json({ alert: r.rows[0] });
+  } catch(e) { next(e); }
+});
 
 app.use((error, _req, res, _next) => {
   console.error('API error:', error.message);
